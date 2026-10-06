@@ -138,24 +138,27 @@ class ModelManager {
      * dynamic (-1) dims by falling back to sane defaults.
      */
     private fun resolveInputLayout(shape: IntArray) {
-        val (w, h, c, nchw) = when {
+        when {
             // [1, C, H, W] - Ultralytics TFLite export shape (C is the small dim)
             shape.size == 4 && shape[1] in 1..4 -> {
-                val ch = shape[1]
-                val hh = if (shape[2] > 0) shape[2] else 512
-                val ww = if (shape[3] > 0) shape[3] else 512
-                listOf(ww, hh, ch, true)
+                isNchwLayout = true
+                inputChannels = shape[1]
+                inputHeight = if (shape[2] > 0) shape[2] else 512
+                inputWidth = if (shape[3] > 0) shape[3] else 512
             }
             // [1, H, W, C] - classic NHWC export (C is the small dim at the end)
             shape.size == 4 && shape[3] in 1..4 -> {
-                val hh = if (shape[1] > 0) shape[1] else 512
-                val ww = if (shape[2] > 0) shape[2] else 512
-                listOf(ww, hh, shape[3], false)
+                isNchwLayout = false
+                inputHeight = if (shape[1] > 0) shape[1] else 512
+                inputWidth = if (shape[2] > 0) shape[2] else 512
+                inputChannels = shape[3]
             }
             // Unknown/odd shape - assume the common NHWC default.
-            else -> listOf(512, 512, 3, false)
+            else -> {
+                isNchwLayout = false
+                inputWidth = 512; inputHeight = 512; inputChannels = 3
+            }
         }
-        inputWidth = w; inputHeight = h; inputChannels = c; isNchwLayout = nchw
     }
 
     /** (Re)allocates the per-frame scratch buffers for the current model. */
