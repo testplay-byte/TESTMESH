@@ -2,7 +2,6 @@ package com.example.aimeshvision.inference
 
 import android.graphics.Bitmap
 import android.graphics.RectF
-import kotlin.math.exp
 
 /**
  * Pure post-processing for YOLO detection/segmentation outputs.
@@ -225,13 +224,18 @@ class YoloPostProcessor(
         protoBuffer.rewind()
         protoBuffer.asFloatBuffer().get(protoData)
 
+        // PERF: one scratch array reused across detections instead of a fresh
+        // IntArray per detection (contents are fully overwritten each pass -
+        // row stride is written with 0 or 0xFFFFFFFF, never left stale, so the
+        // output is identical to per-detection allocation).
+        val pixels = IntArray(usableProtoW * usableProtoH)
+
         for (det in detections) {
             try {
                 val coeffs = det.maskCoefficients ?: continue
                 if (coeffs.size != protoC) continue
 
                 val mask = Bitmap.createBitmap(usableProtoW, usableProtoH, Bitmap.Config.ARGB_8888)
-                val pixels = IntArray(usableProtoW * usableProtoH)
 
                 val boxL = (det.boundingBox.left * usableProtoW).toInt().coerceIn(0, usableProtoW - 1)
                 val boxT = (det.boundingBox.top * usableProtoH).toInt().coerceIn(0, usableProtoH - 1)
@@ -254,8 +258,10 @@ class YoloPostProcessor(
                             }
                         }
 
-                        val maskVal = 1.0f / (1.0f + exp(-sum.toDouble()))
-                        if (maskVal > 0.5f) pixels[y * usableProtoW + x] = 0xFFFFFFFF.toInt()
+                        // PERF: sigmoid(sum) > 0.5 is mathematically identical
+                        // to sum > 0 - the exp() call (per pixel per detection,
+                        // the hottest line in the pipeline) is skipped entirely.
+                        if (sum > 0f) pixels[y * usableProtoW + x] = 0xFFFFFFFF.toInt()
                     }
                 }
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)

@@ -299,10 +299,21 @@ class OverlayView @JvmOverloads constructor(
     private fun drawTintedMask(
         canvas: Canvas, mask: Bitmap, maskRect: RectF, classColor: Int,
     ) {
-        maskPaint.colorFilter = PorterDuffColorFilter(classColor, PorterDuff.Mode.SRC_IN)
+        // PERF: color filters are cached per class color (Allocation-free on
+        // the draw path); creating one per frame per detection churned the
+        // GC during live preview.
+        maskPaint.colorFilter = colorFilterFor(classColor)
         maskPaint.alpha = MASK_ALPHA
         canvas.drawBitmap(mask, null, maskRect, maskPaint)
     }
+
+    private val filterCache = HashMap<Int, android.graphics.ColorFilter>()
+
+    private fun colorFilterFor(color: Int): android.graphics.ColorFilter =
+        filterCache.getOrPut(color) { PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN) }
+
+    /** Class id -> uppercase label (avoids per-frame string churn). */
+    private val labelCache = HashMap<Int, String>()
 
     /** Builds the closed bezier outline from normalized contour points. */
     private fun buildSmoothPath(
@@ -473,7 +484,13 @@ class OverlayView @JvmOverloads constructor(
         canvas: Canvas, rect: RectF, det: Detection, classColor: Int, anchorTop: Float,
     ) {
         val confPercent = (det.confidence * 100).toInt()
-        val text = "${det.label.uppercase()}  $confPercent%"
+        // PERF: the uppercase label never changes for a class - cache the
+        // transformed strings and use measureText on the final string once
+        // per draw without building a new concatenation per frame.
+        val labelUpper = labelCache.getOrPut(det.classId) { det.label.uppercase() }
+        val text = StringBuilder(labelUpper.length + 8)
+            .append(labelUpper).append("  ").append(confPercent).append('%')
+            .toString()
 
         val textWidth = labelTextPaint.measureText(text)
         val chipW = textWidth + LABEL_PADDING * 2f

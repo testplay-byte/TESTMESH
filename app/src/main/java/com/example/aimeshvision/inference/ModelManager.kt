@@ -86,6 +86,11 @@ class ModelManager {
     private var protoBuffer: ByteBuffer? = null
     private var pixelScratch: IntArray? = null
 
+    // PERF: letterbox surfaces reused across frames. Creating a 512x512
+    // bitmap + canvas every frame churned ~1 MB of bitmap memory per pass.
+    private var letterboxBitmap: Bitmap? = null
+    private var letterboxCanvas: Canvas? = null
+
     /**
      * Loads a .tflite model file. Succeeds even if the GPU delegate cannot init
      * (falls back to 4-thread XNNPACK CPU). Returns false only if the model
@@ -289,6 +294,8 @@ class ModelManager {
 
     private fun releaseBuffers() {
         inputBuffer = null; boxBuffer = null; protoBuffer = null; pixelScratch = null
+        letterboxBitmap?.recycle()
+        letterboxBitmap = null; letterboxCanvas = null
     }
 
     /**
@@ -301,8 +308,14 @@ class ModelManager {
         val pixels = pixelScratch ?: return
 
         val scaled = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
-        val finalBitmap = Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(finalBitmap)
+        // Reuse the cached model-size surface (cleared to black each pass).
+        val finalBitmap = letterboxBitmap ?: Bitmap.createBitmap(
+            inputWidth, inputHeight, Bitmap.Config.ARGB_8888
+        ).also { lb ->
+            letterboxBitmap = lb
+            letterboxCanvas = Canvas(lb)
+        }
+        val canvas = letterboxCanvas ?: Canvas(finalBitmap)
         canvas.drawColor(android.graphics.Color.BLACK)
         canvas.drawBitmap(scaled, lastPaddingX, lastPaddingY, null)
 
