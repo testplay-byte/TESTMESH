@@ -42,14 +42,14 @@ class InferenceEngine {
         executor.execute {
             try {
                 val result = task()
-                mainHandler.execute { onResult(result) }
+                mainHandler.post { onResult(result) }
             } catch (e: Exception) {
                 Log.e(TAG, "Task '$tag' failed", e)
-                mainHandler.execute { onError(e) }
+                mainHandler.post { onError(e) }
             } catch (t: Throwable) {
                 // Even a non-Exception Throwable must not kill the thread.
                 Log.e(TAG, "Task '$tag' threw a fatal throwable", t)
-                mainHandler.execute { onError(IllegalStateException(t.message, t)) }
+                mainHandler.post { onError(IllegalStateException(t.message, t)) }
             }
         }
     }
@@ -62,7 +62,7 @@ class InferenceEngine {
     /** Runs [block] on the main thread (safe from any thread). */
     fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block()
-        else mainHandler.execute(block)
+        else mainHandler.post(block)
     }
 
     /**
