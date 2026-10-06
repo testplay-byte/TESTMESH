@@ -58,6 +58,8 @@ class MainActivity : AppCompatActivity() {
         private const val PREF_USE_GPU = "use_gpu"
         private const val PREF_CONF = "conf_threshold"
         private const val PREF_IOU = "iou_threshold"
+        private const val PREF_SHOW_BOXES = "show_boxes"
+        private const val PREF_SMOOTH = "smooth_outline"
         private const val ASSET_MODEL = "model.tflite"
         private const val ASSET_LABELS = "labels.txt"
         private const val BUNDLED_MODEL_NAME = "bundled_model.tflite"
@@ -70,6 +72,9 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile private var isPaused = false
     @Volatile private var useGpu = true
+
+    /** True while the settings sheet is open - camera inference pauses. */
+    @Volatile private var settingsOpen = false
     private var currentModelFilename: String? = null
     private val modelLoading = AtomicBoolean(false)
 
@@ -87,6 +92,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSettings: LinearLayout
     private lateinit var tvLiveLabel: TextView
     private lateinit var tvModelName: TextView
+    private lateinit var tvLoading: TextView
     private lateinit var indicatorDot: View
     private lateinit var tvConfidence: TextView
     private lateinit var tvLatency: TextView
@@ -97,6 +103,7 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.GetContent()
     ) { uri ->
         uri ?: return@registerForActivityResult
+        showModelLoading(true, "LOADING MODEL…")
         engine.run("model-import",
             task = {
                 // F5 fixed: stream handled with use{} - no leak on any error path
@@ -111,6 +118,7 @@ class MainActivity : AppCompatActivity() {
                 destFile
             },
             onResult = { file ->
+                showModelLoading(false)
                 currentModelFilename = file.name
                 prefs.edit().putString(PREF_MODEL_FILENAME, file.name).apply()
                 updateModelNameHeader()
@@ -121,8 +129,9 @@ class MainActivity : AppCompatActivity() {
                 if (isPaused) togglePause()
             },
             onError = { e ->
+                showModelLoading(false)
                 Log.e(TAG, "Model import failed", e)
-                updateBadge("ERR: MODEL", false, "#EF4444")
+                updateBadge("ERR: MODEL LOAD", false, "#EF4444")
             },
         )
     }
@@ -196,6 +205,8 @@ class MainActivity : AppCompatActivity() {
         useGpu = prefs.getBoolean(PREF_USE_GPU, true)
         modelManager.confidenceThreshold = prefs.getFloat(PREF_CONF, ModelManager.DEFAULT_CONFIDENCE)
         modelManager.nmsIouThreshold = prefs.getFloat(PREF_IOU, ModelManager.DEFAULT_IOU)
+        overlayView.showBoxes = prefs.getBoolean(PREF_SHOW_BOXES, true)
+        overlayView.showSmoothOutline = prefs.getBoolean(PREF_SMOOTH, false)
 
         bindViews()
 
@@ -240,6 +251,7 @@ class MainActivity : AppCompatActivity() {
         btnSettings = findViewById(R.id.btnSettings)
         tvLiveLabel = findViewById(R.id.tvLiveLabel)
         tvModelName = findViewById(R.id.tvModelName)
+        tvLoading = findViewById(R.id.tvLoading)
         indicatorDot = findViewById(R.id.indicatorDot)
         tvConfidence = findViewById(R.id.tvConfidence)
         tvLatency = findViewById(R.id.tvLatency)
@@ -254,6 +266,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun loadBundledOrSavedModel() {
         if (modelLoading.getAndSet(true)) return
+        showModelLoading(true, "STARTING MODEL…")
 
         engine.run("model-bootstrap",
             task = {
@@ -267,6 +280,7 @@ class MainActivity : AppCompatActivity() {
             },
             onResult = { (name, ready, wasSaved) ->
                 modelLoading.set(false)
+                showModelLoading(false)
                 if (ready) {
                     currentModelFilename = name
                     prefs.edit().putString(PREF_MODEL_FILENAME, name).apply()
@@ -279,6 +293,7 @@ class MainActivity : AppCompatActivity() {
             },
             onError = { e ->
                 modelLoading.set(false)
+                showModelLoading(false)
                 Log.e(TAG, "Model bootstrap failed", e)
                 updateBadge("MODEL ERR", false, "#EF4444")
             },
@@ -336,7 +351,7 @@ class MainActivity : AppCompatActivity() {
 
     private inner class InferenceAnalyzer : ImageAnalysis.Analyzer {
         override fun analyze(image: ImageProxy) {
-            if (isPaused) { image.close(); return }
+            if (isPaused || settingsOpen) { image.close(); return }
             if (!modelManager.isReady) {
                 image.close()
                 engine.onMain { updateBadge("AWAITING MODEL", false, "#F59E0B") }
@@ -449,13 +464,27 @@ class MainActivity : AppCompatActivity() {
         val tvModelName = view.findViewById<TextView>(R.id.tvCurrentModelName)
         val panelSelect = view.findViewById<LinearLayout>(R.id.panelSelectModel)
         val switchGpu = view.findViewById<SwitchCompat>(R.id.switchGpu)
+        val switchBoxes = view.findViewById<SwitchCompat>(R.id.switchBoxes)
+        val switchSmooth = view.findViewById<SwitchCompat>(R.id.switchSmooth)
         val sliderConf = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderConf)
         val tvConfValue = view.findViewById<TextView>(R.id.tvConfValue)
         val sliderIou = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderIou)
         val tvIouValue = view.findViewById<TextView>(R.id.tvIouValue)
 
-        tvModelName.text = currentModelFilename ?: "Bundled model (default)"
+        tvModelName.text = currentModelFilename ?: "Bundled (default)"
         switchGpu.isChecked = useGpu
+
+        // Display options: persisted, applied live to the overlay.
+        switchBoxes.isChecked = overlayView.showBoxes
+        switchBoxes.setOnCheckedChangeListener { _, isChecked ->
+            overlayView.showBoxes = isChecked
+            prefs.edit().putBoolean(PREF_SHOW_BOXES, isChecked).apply()
+        }
+        switchSmooth.isChecked = overlayView.showSmoothOutline
+        switchSmooth.setOnCheckedChangeListener { _, isChecked ->
+            overlayView.showSmoothOutline = isChecked
+            prefs.edit().putBoolean(PREF_SMOOTH, isChecked).apply()
+        }
 
         // F10 fixed: confidence + IoU are user-adjustable, persisted, and applied live.
         // Material sliders (0..95 / 10..90 in percent) with live value chips.
@@ -483,29 +512,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // While the sheet is open, pause live inference so the camera feed
+        // and CPU/GPU are free; dismiss resumes automatically.
+        settingsOpen = true
+        dialog.setOnDismissListener {
+            settingsOpen = false
+            updateBadge("LIVE FEED", true, "#4ADE80")
+        }
+
         panelSelect.setOnClickListener {
             dialog.dismiss()
             modelPickerLauncher.launch("*/*")
-        }
-
-        // Diagnostics: tap to copy all saved crash reports to the clipboard.
-        // Reports are plain text files in filesDir/crash_logs - fully offline.
-        val crashReports = com.example.aimeshvision.crash.CrashHandler.reports()
-        view.findViewById<TextView>(R.id.tvCrashCount).text =
-            if (crashReports.isEmpty()) "none saved on this device"
-            else "${crashReports.size} saved on this device - tap to copy"
-        view.findViewById<LinearLayout>(R.id.panelCrashLogs).setOnClickListener {
-            if (crashReports.isEmpty()) {
-                Toast.makeText(this, "No crash reports saved", Toast.LENGTH_SHORT).show()
-            } else {
-                val all = crashReports.joinToString("\n\n════════\n\n") { file ->
-                    runCatching { file.readText() }.getOrDefault("(unreadable: ${file.name})")
-                }
-                clipboard("AI-MESH-FLOW crash reports", all)
-                Toast.makeText(this, "Copied ${crashReports.size} report(s)", Toast.LENGTH_SHORT).show()
-                com.example.aimeshvision.crash.CrashHandler.clearAll()
-                dialog.dismiss()
-            }
         }
 
         switchGpu.setOnCheckedChangeListener { _, isChecked ->
@@ -562,12 +579,6 @@ class MainActivity : AppCompatActivity() {
 
     // ── ui helpers ────────────────────────────────────────────────────────────
 
-    /** Copies [text] to the system clipboard with a given label. */
-    private fun clipboard(label: String, text: String) {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        cm.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
-    }
-
     private fun updatePauseButtonUI() {
         btnPauseResume.setImageResource(
             if (isPaused) R.drawable.ic_play_arrow else R.drawable.ic_pause)
@@ -587,10 +598,23 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Top-center header shows the active model; the LIVE FEED badge sits under
-     * it (both centered, per the new top layout).
+     * it (both centered, per the new top layout). "Bundled (default)" makes it
+     * clear the preloaded model is the factory default, not a user pick.
      */
     private fun updateModelNameHeader() {
-        tvModelName.text = currentModelFilename ?: "BUNDLED MODEL"
+        tvModelName.text = currentModelFilename ?: "Bundled (default)"
+    }
+
+    /**
+     * Prominent loading indicator while a model parses (copy + GPU delegate
+     * init can take a few seconds). Shows/hides the dedicated loading chip.
+     */
+    private fun showModelLoading(show: Boolean, message: String = "") {
+        engine.onMain {
+            tvLoading.text = message
+            tvLoading.visibility = if (show) View.VISIBLE else View.GONE
+            if (show) updateBadge(message, true, "#F59E0B")
+        }
     }
 
     private fun updateBadge(text: String, isBlinking: Boolean, colorHex: String) {
