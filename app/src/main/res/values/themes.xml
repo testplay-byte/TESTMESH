@@ -19,9 +19,10 @@
 
         <!-- Bottom-sheet shape: matches our 28dp top-corner drawable so the
              Material backdrop never shows square corners behind the sheet. -->
-        <style name="Theme.AIMeshVision.Sheet" parent="ThemeOverlay.MaterialComponents.BottomSheetDialog">
-            <item name="bottomSheetStyle">@style/BottomSheet.Rounded</item>
-        </style>
+    </style>
+    <style name="Theme.AIMeshVision.Sheet" parent="ThemeOverlay.MaterialComponents.BottomSheetDialog">
+        <item name="bottomSheetStyle">@style/BottomSheet.Rounded</item>
+    </style>
         <style name="BottomSheet.Rounded" parent="Widget.MaterialComponents.BottomSheet.Modal">
             <item name="shapeAppearanceOverlay">@style/SheetCorners</item>
             <item name="android:background">@drawable/bg_sheet_rounded</item>

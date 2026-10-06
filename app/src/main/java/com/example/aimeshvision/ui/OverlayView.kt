@@ -145,7 +145,7 @@ class OverlayView @JvmOverloads constructor(
                     val resampled = resampleClosed(raw, RESAMPLE_POINTS)
                     // NORMALIZE to 0..1 mask space - screen mapping happens in
                     // onDraw. (v3 bug: mask pixels were used as if normalized.)
-                    val norm = resampled.map { (p) ->
+                    val norm = resampled.map { p ->
                         (p.first / mask.width) to (p.second / mask.height)
                     }
                     if (firstOfClass) {
@@ -182,26 +182,24 @@ class OverlayView @JvmOverloads constructor(
         classId: Int, raw: List<Pair<Float, Float>>,
     ): List<Pair<Float, Float>> {
         val prev = tracks[classId]
-        val out: List<Pair<Float, Float>> =
-            if (prev == null || prev.points.size != raw.size) {
-                raw
-            } else {
-                ArrayList(raw.size).also { list ->
-                    for (i in raw.indices) {
-                        val px = prev.points[i].first
-                        val py = prev.points[i].second
-                        val nx = raw[i].first
-                        val ny = raw[i].second
-                        val dist = sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
-                        list.add(
-                            if (dist > MAX_TRACK_DISTANCE) nx to ny   // jump = re-acquire
-                            else px + (nx - px) * (1f - SMOOTHING) to
-                                py + (ny - py) * (1f - SMOOTHING)
-                        )
-                    }
-                }
-            }
-        tracks[classId] = Track(out.toTypedArray(), prev?.labelAnchor)
+        if (prev == null || prev.points.size != raw.size) {
+            tracks[classId] = Track(raw.toTypedArray(), prev?.labelAnchor)
+            return raw
+        }
+        val out = ArrayList<Pair<Float, Float>>(raw.size)
+        for (i in raw.indices) {
+            val px = prev.points[i].first
+            val py = prev.points[i].second
+            val nx = raw[i].first
+            val ny = raw[i].second
+            val dist = sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
+            out.add(
+                if (dist > MAX_TRACK_DISTANCE) nx to ny   // jump = re-acquire
+                else px + (nx - px) * (1f - SMOOTHING) to
+                    py + (ny - py) * (1f - SMOOTHING)
+            )
+        }
+        tracks[classId] = Track(out.toTypedArray(), prev.labelAnchor)
         return out
     }
 
