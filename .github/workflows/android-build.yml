@@ -18,9 +18,9 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # No android-actions/setup-android needed: ubuntu-latest runners ship a
+      # preinstalled Android SDK with licenses already accepted. That action
+      # failed on 'sdkmanager tools' (obsolete package) in run 37401758273.
       - name: Set up Gradle (with caching)
         uses: gradle/actions/setup-gradle@v4
 
