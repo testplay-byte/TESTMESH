@@ -11,9 +11,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.view.WindowInsetsController
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -628,15 +626,15 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
 
         val root = findViewById<View>(R.id.rootLayout)
-        ViewCompat.setOnApplyInsetsListener(root) { view, insets ->
+        // Platform insets listener (API 30+; minSdk is 31, so no compat needed).
+        root.setOnApplyInsetsListener { view, insets ->
             // Pad the top for the (visible, translucent) status bar and the
             // bottom for the gesture navigation bar.
             val bars = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or
-                    WindowInsetsCompat.Type.displayCutout()
+                android.view.WindowInsets.Type.systemBars() or
+                    android.view.WindowInsets.Type.displayCutout()
             )
             view.setPadding(0, bars.top, 0, bars.bottom)
-            insets
         }
     }
 }
