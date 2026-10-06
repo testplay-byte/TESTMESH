@@ -481,6 +481,26 @@ class MainActivity : AppCompatActivity() {
             modelPickerLauncher.launch("*/*")
         }
 
+        // Diagnostics: tap to copy all saved crash reports to the clipboard.
+        // Reports are plain text files in filesDir/crash_logs - fully offline.
+        val crashReports = com.example.aimeshvision.crash.CrashHandler.reports()
+        view.findViewById<TextView>(R.id.tvCrashCount).text =
+            if (crashReports.isEmpty()) "none saved on this device"
+            else "${crashReports.size} saved on this device - tap to copy"
+        view.findViewById<LinearLayout>(R.id.panelCrashLogs).setOnClickListener {
+            if (crashReports.isEmpty()) {
+                Toast.makeText(this, "No crash reports saved", Toast.LENGTH_SHORT).show()
+            } else {
+                val all = crashReports.joinToString("\n\n════════\n\n") { file ->
+                    runCatching { file.readText() }.getOrDefault("(unreadable: ${file.name})")
+                }
+                clipboard("AI-MESH-FLOW crash reports", all)
+                Toast.makeText(this, "Copied ${crashReports.size} report(s)", Toast.LENGTH_SHORT).show()
+                com.example.aimeshvision.crash.CrashHandler.clearAll()
+                dialog.dismiss()
+            }
+        }
+
         switchGpu.setOnCheckedChangeListener { _, isChecked ->
             useGpu = isChecked
             prefs.edit().putBoolean(PREF_USE_GPU, useGpu).apply()
@@ -534,6 +554,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ── ui helpers ────────────────────────────────────────────────────────────
+
+    /** Copies [text] to the system clipboard with a given label. */
+    private fun clipboard(label: String, text: String) {
+        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+    }
 
     private fun updatePauseButtonUI() {
         btnPauseResume.setImageResource(

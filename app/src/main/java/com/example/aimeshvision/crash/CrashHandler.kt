@@ -26,10 +26,25 @@ class CrashHandler private constructor(
         private const val DIR = "crash_logs"
         private const val KEEP = 5
 
+        @Volatile private var installed: CrashHandler? = null
+
         /** Call once from the Application class. */
         fun install(context: Context) {
             val previous = Thread.getDefaultUncaughtExceptionHandler()
-            Thread.setDefaultUncaughtExceptionHandler(CrashHandler(context.applicationContext, previous))
+            installed = CrashHandler(context.applicationContext, previous)
+            Thread.setDefaultUncaughtExceptionHandler(installed)
+        }
+
+        /**
+         * Saved crash reports, newest first (surfaced in settings for debugging).
+         * Returns an empty list before install or when nothing has crashed.
+         */
+        fun reports(): List<File> =
+            installed?.crashReports() ?: emptyList()
+
+        /** Deletes every saved crash report (used by the "copy all" flow). */
+        fun clearAll() {
+            installed?.crashReports()?.forEach { it.delete() }
         }
     }
 
@@ -67,7 +82,7 @@ class CrashHandler private constructor(
         throwable.printStackTrace(PrintWriter(it))
     }.toString()
 
-    /** Newest crash reports, newest first (surfaced in settings for debugging). */
-    fun crashReports(): List<File> =
+    /** Newest crash reports, newest first (used by [companion.reports]). */
+    private fun crashReports(): List<File> =
         File(context.filesDir, DIR).listFiles()?.sortedByDescending { it.name } ?: emptyList()
 }

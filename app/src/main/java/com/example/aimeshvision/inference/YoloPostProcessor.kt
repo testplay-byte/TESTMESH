@@ -52,8 +52,12 @@ class YoloPostProcessor(
         origW: Float,
         origH: Float,
         labels: List<String>?,
+        expectMaskCoeffs: Boolean = false,
     ): List<Detection> {
-        val raw = parseOutput(boxBuffer, boxShape, labels, inputW, inputH, padX, padY, origW, origH)
+        val raw = parseOutput(
+            boxBuffer, boxShape, labels, inputW, inputH, padX, padY, origW, origH,
+            expectMaskCoeffs,
+        )
         val accepted = applyNms(raw)
 
         if (protoBuffer != null && protoShape != null && accepted.isNotEmpty()) {
@@ -65,6 +69,11 @@ class YoloPostProcessor(
     /**
      * Parses the raw detection tensor into normalized [Detection]s.
      * Throws IllegalArgumentException only for hopeless shapes - callers guard.
+     *
+     * @param expectMaskCoeffs when true (prototype tensor present), the trailing
+     *   MASK_COEFFS feature rows are mask coefficients; when false they are
+     *   class scores. The old heuristic (feature count > 32+4) misclassified
+     *   detect-only models with many classes.
      */
     private fun parseOutput(
         output: java.nio.ByteBuffer,
@@ -76,6 +85,7 @@ class YoloPostProcessor(
         padY: Float,
         origW: Float,
         origH: Float,
+        expectMaskCoeffs: Boolean,
     ): List<Detection> {
         if (shape.size < 3) return emptyList()
 
@@ -92,7 +102,9 @@ class YoloPostProcessor(
         var numClasses = numFeatures - 4 - (if (hasObjectness) 1 else 0)
 
         // YOLO-seg appends MASK_COEFFS prototype coefficients after the class scores.
-        val hasMaskCoeffs = numClasses > MASK_COEFFS
+        // Presence is decided by the model graph (prototype output tensor), with the
+        // legacy feature-count heuristic as a fallback for shape-only callers.
+        val hasMaskCoeffs = expectMaskCoeffs || numClasses > MASK_COEFFS
         if (hasMaskCoeffs) numClasses -= MASK_COEFFS
         if (numClasses <= 0) return emptyList()
 
