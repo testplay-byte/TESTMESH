@@ -58,11 +58,19 @@ class OverlayView @JvmOverloads constructor(
         private const val MASK_ALPHA = 110
 
         // ── ring outline ─────────────────────────────────────────────────
-        // Dilation radius in MASK pixels (mask ≈ 128px across the model input,
-        // so 2px ≈ 8 screen px at 512 input) and the number of directions the
-        // silhouette is stamped in - more directions = rounder ring.
-        private const val RING_RADIUS_PX = 2f
-        private const val RING_DIRECTIONS = 16
+        // Line geometry in MASK pixels (mask ≈ 128px across the model input):
+        // the line is CENTERED on the boundary - an outer band (dilation) plus
+        // an inner band (erosion), total width ≈ 2 * RING_RADIUS_PX, so 0.75px
+        // ≈ 6 screen px at 512 input (the old bezier stroke was 5px). Sub-pixel
+        // stamp offsets + bilinear filtering feather the edges: no staircase.
+        private const val RING_RADIUS_PX = 0.75f
+        private const val RING_DIRECTIONS = 24
+
+        // Temporal blend: last frame's ring is unioned in at this alpha, which
+        // softens single-frame edge flicker (the smoothness of the old EMA
+        // line, with zero curve fitting). Regions the mask truly drops decay
+        // geometrically and vanish in a few frames - no ghosting.
+        private const val RING_TEMPORAL_ALPHA = 120
 
         // ── temporal smoothing (label anchor EMA) ────────────────────────
         private const val SMOOTHING = 0.45f
@@ -94,6 +102,9 @@ class OverlayView @JvmOverloads constructor(
     private val ringCutPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
     }
+    private val temporalPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+        alpha = RING_TEMPORAL_ALPHA
+    }
     private val ringDrawPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val labelBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = COLOR_LABEL_BG
@@ -121,6 +132,9 @@ class OverlayView @JvmOverloads constructor(
     // ── ring scratch pool (no per-frame bitmap churn) ─────────────────────────
     private val ringPool = ArrayList<Bitmap>(4)
     private var ringPoolUsed = 0
+
+    /** Last frame's composited ring per class id (temporal smoothing source). */
+    private val prevRings = HashMap<Int, Bitmap>()
 
     private fun obtainRing(w: Int, h: Int): Bitmap {
         while (ringPoolUsed >= ringPool.size) {
@@ -159,7 +173,7 @@ class OverlayView @JvmOverloads constructor(
             if (mask != null) {
                 val firstOfClass = seenClasses.add(det.classId)
                 if (showSmoothOutline) {
-                    ring = buildRing(mask)
+                    ring = buildRing(det.classId, mask)
                 }
                 val rawTop = rawTopNorm(mask)
                 anchor = if (firstOfClass) {
@@ -179,6 +193,7 @@ class OverlayView @JvmOverloads constructor(
         prepared = emptyList()
         ringPoolUsed = 0
         releaseUnusedRings()
+        releasePrevRings()
         invalidate()
     }
 
@@ -188,23 +203,37 @@ class OverlayView @JvmOverloads constructor(
         prepared = emptyList()
         ringPoolUsed = 0
         releaseUnusedRings()
+        releasePrevRings()
         invalidate()
+    }
+
+    private fun releasePrevRings() {
+        prevRings.values.forEach { it.recycle() }
+        prevRings.clear()
     }
 
     // ── ring construction: dilate the silhouette, subtract the mask ───────────
 
     /**
-     * Builds the outline ring: stamp the mask in [RING_DIRECTIONS] directions
-     * at [RING_RADIUS_PX], then subtract the original mask (DST_OUT). The
-     * result is a band that follows the mask's own boundary EXACTLY - fingers,
-     * corners, thin protrusions included. No curve fitting, nothing to lag.
+     * Builds the outline LINE centered on the mask boundary:
+     *  1. OUTER band - stamp the mask in [RING_DIRECTIONS] directions at
+     *     [RING_RADIUS_PX] (dilation), subtract the mask (DST_OUT).
+     *  2. INNER band - restore the mask, then erode it with inward stamps
+     *     (sequential DST_OUT); what remains outside the eroded core is the
+     *     inner half of the line.
+     * The result follows the mask's own boundary EXACTLY - fingers, corners,
+     * thin protrusions included - and because the stamps land on sub-pixel
+     * offsets with bilinear filtering, the edges are feathered, not staircased.
+     *  3. TEMPORAL BLEND - union with a faded copy of last frame's ring so
+     *     single-frame edge flicker melts away (no curve fitting involved).
      */
-    private fun buildRing(mask: Bitmap): Bitmap {
+    private fun buildRing(classId: Int, mask: Bitmap): Bitmap {
         val ring = obtainRing(mask.width, mask.height)
         val c = Canvas(ring)
         c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
 
         val step = RING_RADIUS_PX
+        // 1. Outer band.
         for (i in 0 until RING_DIRECTIONS) {
             val angle = (i * 2.0 * Math.PI) / RING_DIRECTIONS
             c.drawBitmap(
@@ -214,12 +243,44 @@ class OverlayView @JvmOverloads constructor(
                 ringStampPaint,
             )
         }
-        // The 16 stamps leave a small hollow at the center - stamp once more.
-        c.drawBitmap(mask, 0f, 0f, ringStampPaint)
-
-        // Ring = dilated silhouette MINUS the original mask.
         c.drawBitmap(mask, 0f, 0f, ringCutPaint)
+
+        // 2. Inner band: mask back in, then erode the core away.
+        c.drawBitmap(mask, 0f, 0f, ringStampPaint)
+        for (i in 0 until RING_DIRECTIONS) {
+            val angle = (i * 2.0 * Math.PI) / RING_DIRECTIONS
+            c.drawBitmap(
+                mask,
+                (-cos(angle) * step).toFloat(),
+                (-sin(angle) * step).toFloat(),
+                ringCutPaint,
+            )
+        }
+
+        // 3. Temporal blend with last frame's ring.
+        prevRings[classId]?.let { prev ->
+            if (prev.width == ring.width && prev.height == ring.height) {
+                c.drawBitmap(prev, 0f, 0f, temporalPaint)
+            }
+        }
+        storePrevRing(classId, ring)
         return ring
+    }
+
+    /** Keeps a copy of [ring] as next frame's temporal-blend source. */
+    private fun storePrevRing(classId: Int, ring: Bitmap) {
+        val prev = prevRings.getOrPut(classId) {
+            Bitmap.createBitmap(ring.width, ring.height, Bitmap.Config.ARGB_8888)
+        }
+        if (prev.width != ring.width || prev.height != ring.height) {
+            prev.recycle()
+            prevRings[classId] =
+                Bitmap.createBitmap(ring.width, ring.height, Bitmap.Config.ARGB_8888)
+        }
+        val target = prevRings[classId]!!
+        val pc = Canvas(target)
+        pc.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        pc.drawBitmap(ring, 0f, 0f, ringStampPaint)
     }
 
     /** EMA-blends the label anchor (top edge Y, normalized) across frames. */
