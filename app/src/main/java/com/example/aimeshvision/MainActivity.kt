@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.Typeface
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Bundle
@@ -617,24 +616,6 @@ class MainActivity : AppCompatActivity() {
         if (results.isEmpty()) tvConfidence.text = "---"
         else tvConfidence.text = "${(results.maxOf { it.confidence } * 100).toInt()}%"
         tvLatency.text = "${latencyMs}ms"
-
-        // Live class-chip highlight: the chip of every currently-detected
-        // class fills with its mesh color (dark text); idle chips stay dim.
-        val activeClasses = results.map { it.classId }.toSet()
-        val dp4 = (4 * resources.displayMetrics.density).toInt()
-        val dp6 = (6 * resources.displayMetrics.density).toInt()
-        for (i in 0 until classChipsRow.childCount) {
-            val chip = classChipsRow.getChildAt(i) as? TextView ?: continue
-            val classId = chip.tag as? Int ?: continue
-            val color = com.example.aimeshvision.ui.DetectionStyle.colorFor(classId)
-            val active = classId in activeClasses
-            chip.setTypeface(null, if (active) Typeface.BOLD_ITALIC else Typeface.BOLD)
-            (chip.background as? android.graphics.drawable.GradientDrawable)?.apply {
-                setColor(if (active) (color and 0x00FFFFFF) or 0xE6000000.toInt() else 0x14111111)
-                setStroke(dp4 / 2, (color and 0x00FFFFFF) or (if (active) 0xFF000000.toInt() else 0x50000000.toInt()))
-                cornerRadius = dp6 * 3f
-            }
-        }
     }
 
     private fun resetStats() {
@@ -683,8 +664,6 @@ class MainActivity : AppCompatActivity() {
                     cornerRadius = dp6 * 3f
                 }
             }
-            // Tag with the class id so [updateStats] can highlight live hits.
-            chip.tag = index
             classChipsRow.addView(chip)
             (chip.layoutParams as? LinearLayout.LayoutParams)?.let {
                 it.marginEnd = dp4

@@ -62,15 +62,9 @@ class OverlayView @JvmOverloads constructor(
         private const val SIMPLIFY_TOLERANCE = 2.0f
 
         // ── temporal smoothing (EMA) ─────────────────────────────────────
-        // Weight of the PREVIOUS frame in the blend: 0 = raw per-frame values,
-        // higher = calmer line/label. 0.65 keeps the outline fluid and kills
-        // most per-frame jitter without noticeable lag.
-        private const val SMOOTHING = 0.65f
+        // 0 = raw per-frame values; higher = calmer line/label.
+        private const val SMOOTHING = 0.45f
         private const val MAX_TRACK_DISTANCE = 0.35f // normalized; beyond = re-acquire
-
-        // Detections persist this long after they stop being reported, so a
-        // single dropped frame never makes the mesh blink out.
-        private const val HOLD_MS = 350L
     }
 
     /** A detection with all per-frame geometry precomputed in [setResults]. */
@@ -112,7 +106,6 @@ class OverlayView @JvmOverloads constructor(
     }
 
     private var prepared: List<PreparedItem> = emptyList()
-    private var lastResultsAt = 0L
     private var sourceImageWidth: Int = 640
     private var sourceImageHeight: Int = 640
 
@@ -138,18 +131,6 @@ class OverlayView @JvmOverloads constructor(
         sourceImageWidth = inputWidth
         sourceImageHeight = inputHeight
 
-        // Persistence hold: when a frame reports nothing (a common single-frame
-        // dropout), keep drawing the previous geometry for HOLD_MS so the mesh
-        // does not visibly blink. Real disappearances expire naturally.
-        if (results.isEmpty()) {
-            if (System.currentTimeMillis() - lastResultsAt > HOLD_MS) {
-                prepared = emptyList()
-                invalidate()
-            }
-            return
-        }
-        lastResultsAt = System.currentTimeMillis()
-
         val seenClasses = mutableSetOf<Int>()
         val items = ArrayList<PreparedItem>(results.size)
         for (det in results) {
@@ -169,10 +150,10 @@ class OverlayView @JvmOverloads constructor(
                     }
                     if (firstOfClass) {
                         contour = emaContour(det.classId, norm)
-                        anchor = emaAnchor(det.classId, contour)
+                        anchor = emaAnchor(det.classId, mask)
                     } else {
                         contour = norm
-                        anchor = norm.minOfOrNull { it.second }
+                        anchor = rawTopNorm(mask)
                     }
                 }
             }
@@ -196,42 +177,17 @@ class OverlayView @JvmOverloads constructor(
 
     // ── temporal smoothing ────────────────────────────────────────────────────
 
-    /**
-     * EMA-blends the raw (normalized) contour with the previous track.
-     * Two anti-scribble measures:
-     *  1. START-POINT ALIGNMENT: the contour tracer may begin at any pixel;
-     *     if the start pixel jumps between frames the point correspondence
-     *     twists and the outline scribbles. The raw list is rotated to begin
-     *     at the point nearest the previous frame's first point.
-     *  2. SPATIAL RELAX: after blending, one neighbor-averaging pass softens
-     *     any single-point spikes left by the resampler.
-     */
+    /** EMA-blends the raw (normalized) contour with the previous track. */
     private fun emaContour(
-        classId: Int, rawIn: List<Pair<Float, Float>>,
+        classId: Int, raw: List<Pair<Float, Float>>,
     ): List<Pair<Float, Float>> {
         val prev = tracks[classId]
-        if (prev == null || prev.points.size != rawIn.size) {
-            tracks[classId] = Track(rawIn.toTypedArray(), prev?.labelAnchor)
-            return rawIn
+        if (prev == null || prev.points.size != raw.size) {
+            tracks[classId] = Track(raw.toTypedArray(), prev?.labelAnchor)
+            return raw
         }
-
-        // Rotate raw so index 0 is closest to the previous frame's point 0.
-        val n = rawIn.size
-        var bestIdx = 0
-        var bestD = Float.MAX_VALUE
-        val p0 = prev.points[0]
-        for (i in 0 until n) {
-            val dx = rawIn[i].first - p0.first
-            val dy = rawIn[i].second - p0.second
-            val d = dx * dx + dy * dy
-            if (d < bestD) { bestD = d; bestIdx = i }
-        }
-        val raw = ArrayList<Pair<Float, Float>>(n)
-        for (i in 0 until n) raw.add(rawIn[(bestIdx + i) % n])
-
-        // Temporal blend.
-        val out = ArrayList<Pair<Float, Float>>(n)
-        for (i in 0 until n) {
+        val out = ArrayList<Pair<Float, Float>>(raw.size)
+        for (i in raw.indices) {
             val px = prev.points[i].first
             val py = prev.points[i].second
             val nx = raw[i].first
@@ -243,29 +199,13 @@ class OverlayView @JvmOverloads constructor(
                     py + (ny - py) * (1f - SMOOTHING)
             )
         }
-
-        // Spatial relax: replace each point with the weighted average of it
-        // and its two neighbors (closed loop) - removes residual spikes.
-        val relaxed = ArrayList<Pair<Float, Float>>(n)
-        for (i in 0 until n) {
-            val a = out[(i + n - 1) % n]
-            val b = out[i]
-            val c = out[(i + 1) % n]
-            relaxed.add(
-                (a.first + 2f * b.first + c.first) / 4f to
-                    (a.second + 2f * b.second + c.second) / 4f
-            )
-        }
-        tracks[classId] = Track(relaxed.toTypedArray(), prev.labelAnchor)
-        return relaxed
+        tracks[classId] = Track(out.toTypedArray(), prev.labelAnchor)
+        return out
     }
 
     /** EMA-blends the label anchor (top edge Y, normalized) across frames. */
-    private fun emaAnchor(classId: Int, contour: List<Pair<Float, Float>>?): Float? {
-        // True object top = min Y over the traced contour (mask space 0..1).
-        // The contour now covers the full frame (v6 mask fix), so this is the
-        // REAL top edge of the object, not the bounding box.
-        val raw = contour?.minOfOrNull { it.second } ?: return null
+    private fun emaAnchor(classId: Int, mask: Bitmap): Float? {
+        val raw = rawTopNorm(mask) ?: return null
         val prev = tracks[classId]?.labelAnchor
         val smoothed = if (prev == null || abs(raw - prev) > MAX_TRACK_DISTANCE) {
             raw
@@ -274,6 +214,19 @@ class OverlayView @JvmOverloads constructor(
         }
         tracks[classId]?.labelAnchor = smoothed
         return smoothed
+    }
+
+    /** Topmost opaque row of the mask as a 0..1 fraction of its height. */
+    private fun rawTopNorm(mask: Bitmap): Float? {
+        val w = mask.width
+        val px = IntArray(w)
+        for (y in 0 until mask.height) {
+            mask.getPixels(px, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                if (px[x] != 0) return y.toFloat() / mask.height
+            }
+        }
+        return null
     }
 
     // ── drawing (cached geometry only) ────────────────────────────────────────
