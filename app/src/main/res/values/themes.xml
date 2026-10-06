@@ -16,23 +16,27 @@
         <item name="android:colorPrimary">@android:color/black</item>
         <item name="android:colorPrimaryDark">@android:color/black</item>
         <item name="android:colorAccent">#00FF00</item>
-
-        <!-- Bottom-sheet shape: matches our 28dp top-corner drawable so the
-             Material backdrop never shows square corners behind the sheet. -->
     </style>
+
+    <!--
+        Bottom-sheet dialog theme: the Material sheet itself gets the rounded
+        28dp top-corner shape, so the backdrop never shows square corners
+        behind our settings sheet.
+    -->
     <style name="Theme.AIMeshVision.Sheet" parent="ThemeOverlay.MaterialComponents.BottomSheetDialog">
         <item name="bottomSheetStyle">@style/BottomSheet.Rounded</item>
     </style>
-        <style name="BottomSheet.Rounded" parent="Widget.MaterialComponents.BottomSheet.Modal">
-            <item name="shapeAppearanceOverlay">@style/SheetCorners</item>
-            <item name="android:background">@drawable/bg_sheet_rounded</item>
-        </style>
-        <style name="SheetCorners">
-            <item name="cornerFamily">rounded</item>
-            <item name="cornerSizeTopRight">28dp</item>
-            <item name="cornerSizeTopLeft">28dp</item>
-            <item name="cornerSizeBottomRight">0dp</item>
-            <item name="cornerSizeBottomLeft">0dp</item>
-        </style>
+
+    <style name="BottomSheet.Rounded" parent="Widget.MaterialComponents.BottomSheet.Modal">
+        <item name="shapeAppearanceOverlay">@style/SheetCorners</item>
+        <item name="android:background">@drawable/bg_sheet_rounded</item>
+    </style>
+
+    <style name="SheetCorners">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSizeTopRight">28dp</item>
+        <item name="cornerSizeTopLeft">28dp</item>
+        <item name="cornerSizeBottomRight">0dp</item>
+        <item name="cornerSizeBottomLeft">0dp</item>
     </style>
 </resources>
