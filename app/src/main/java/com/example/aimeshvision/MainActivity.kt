@@ -13,7 +13,6 @@ import android.view.View
 import android.view.WindowInsetsController
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -437,44 +436,39 @@ class MainActivity : AppCompatActivity() {
         val tvModelName = view.findViewById<TextView>(R.id.tvCurrentModelName)
         val panelSelect = view.findViewById<LinearLayout>(R.id.panelSelectModel)
         val switchGpu = view.findViewById<SwitchCompat>(R.id.switchGpu)
-        val seekConf = view.findViewById<SeekBar>(R.id.seekConf)
+        val sliderConf = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderConf)
         val tvConfValue = view.findViewById<TextView>(R.id.tvConfValue)
-        val seekIou = view.findViewById<SeekBar>(R.id.seekIou)
+        val sliderIou = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderIou)
         val tvIouValue = view.findViewById<TextView>(R.id.tvIouValue)
 
         tvModelName.text = currentModelFilename ?: "Bundled model (default)"
         switchGpu.isChecked = useGpu
 
         // F10 fixed: confidence + IoU are user-adjustable, persisted, and applied live.
+        // Material sliders (0..95 / 10..90 in percent) with live value chips.
         val confPct = (modelManager.confidenceThreshold * 100).toInt()
-        seekConf.progress = confPct
+        sliderConf.value = confPct.coerceIn(5, 95).toFloat()
         tvConfValue.text = "$confPct%"
-        seekConf.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                tvConfValue.text = "$value%"
-                if (fromUser) {
-                    modelManager.confidenceThreshold = value / 100f
-                    prefs.edit().putFloat(PREF_CONF, value / 100f).apply()
-                }
+        sliderConf.addOnChangeListener { _, value, fromUser ->
+            val pct = value.toInt()
+            tvConfValue.text = "$pct%"
+            if (fromUser) {
+                modelManager.confidenceThreshold = pct / 100f
+                prefs.edit().putFloat(PREF_CONF, pct / 100f).apply()
             }
-            override fun onStartTrackingTouch(sb: SeekBar?) {}
-            override fun onStopTrackingTouch(sb: SeekBar?) {}
-        })
+        }
 
         val iouPct = (modelManager.nmsIouThreshold * 100).toInt()
-        seekIou.progress = iouPct
+        sliderIou.value = iouPct.coerceIn(10, 90).toFloat()
         tvIouValue.text = "$iouPct%"
-        seekIou.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                tvIouValue.text = "$value%"
-                if (fromUser) {
-                    modelManager.nmsIouThreshold = value / 100f
-                    prefs.edit().putFloat(PREF_IOU, value / 100f).apply()
-                }
+        sliderIou.addOnChangeListener { _, value, fromUser ->
+            val pct = value.toInt()
+            tvIouValue.text = "$pct%"
+            if (fromUser) {
+                modelManager.nmsIouThreshold = pct / 100f
+                prefs.edit().putFloat(PREF_IOU, pct / 100f).apply()
             }
-            override fun onStartTrackingTouch(sb: SeekBar?) {}
-            override fun onStopTrackingTouch(sb: SeekBar?) {}
-        })
+        }
 
         panelSelect.setOnClickListener {
             dialog.dismiss()

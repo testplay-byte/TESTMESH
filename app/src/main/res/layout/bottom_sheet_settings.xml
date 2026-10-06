@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="#111827"
@@ -144,77 +145,113 @@
         android:layout_height="wrap_content"
         android:background="@drawable/bg_glass_btn"
         android:orientation="vertical"
-        android:padding="16dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="18dp"
+        android:paddingBottom="14dp"
         android:layout_marginBottom="20dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Confidence"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"/>
-
+        <!-- Confidence slider: Material slider with a value chip that shows
+             the live percent inside the track end. -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
-            <SeekBar
-                android:id="@+id/seekConf"
+            <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:max="95"
-                android:progress="35"/>
+                android:text="Confidence"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"/>
 
             <TextView
                 android:id="@+id/tvConfValue"
-                android:layout_width="48dp"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="end"
+                android:background="@drawable/bg_value_chip"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="3dp"
                 android:text="35%"
-                android:textColor="#BCF362"
-                android:textSize="13sp"/>
+                android:textColor="#0B0B0D"
+                android:textSize="12sp"
+                android:textStyle="bold"/>
         </LinearLayout>
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/sliderConf"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:valueFrom="5"
+            android:valueTo="95"
+            android:stepSize="1"
+            android:value="35"
+            app:labelBehavior="gone"
+            app:thumbColor="#BCF362"
+            app:trackColorActive="#BCF362"
+            app:trackColorInactive="#1F2937"
+            app:trackHeight="6dp"
+            app:tickVisible="false"/>
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:text="NMS Overlap (IoU)"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"/>
+            android:text="Minimum certainty to show a detection. Higher = fewer, cleaner boxes."
+            android:textColor="#94A3B8"
+            android:textSize="11sp"/>
 
+        <!-- NMS IoU slider, same treatment -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
-            <SeekBar
-                android:id="@+id/seekIou"
+            <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:max="90"
-                android:progress="45"/>
+                android:text="NMS Overlap (IoU)"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"/>
 
             <TextView
                 android:id="@+id/tvIouValue"
-                android:layout_width="48dp"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="end"
+                android:background="@drawable/bg_value_chip"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="3dp"
                 android:text="45%"
-                android:textColor="#BCF362"
-                android:textSize="13sp"/>
+                android:textColor="#0B0B0D"
+                android:textSize="12sp"
+                android:textStyle="bold"/>
         </LinearLayout>
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/sliderIou"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:valueFrom="10"
+            android:valueTo="90"
+            android:stepSize="1"
+            android:value="45"
+            app:labelBehavior="gone"
+            app:thumbColor="#BCF362"
+            app:trackColorActive="#BCF362"
+            app:trackColorInactive="#1F2937"
+            app:trackHeight="6dp"
+            app:tickVisible="false"/>
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text="Higher confidence = fewer, more certain detections."
+            android:text="How much overlapping boxes may intersect before they merge. Higher = fewer duplicates."
             android:textColor="#94A3B8"
             android:textSize="11sp"/>
     </LinearLayout>
