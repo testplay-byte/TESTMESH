@@ -233,13 +233,12 @@ class YoloPostProcessor(
                 val mask = Bitmap.createBitmap(usableProtoW, usableProtoH, Bitmap.Config.ARGB_8888)
                 val pixels = IntArray(usableProtoW * usableProtoH)
 
-                val boxL = (det.boundingBox.left * usableProtoW).toInt().coerceIn(0, usableProtoW - 1)
-                val boxT = (det.boundingBox.top * usableProtoH).toInt().coerceIn(0, usableProtoH - 1)
-                val boxR = (det.boundingBox.right * usableProtoW).toInt().coerceIn(0, usableProtoW - 1)
-                val boxB = (det.boundingBox.bottom * usableProtoH).toInt().coerceIn(0, usableProtoH - 1)
-
-                for (y in boxT..boxB) {
-                    for (x in boxL..boxR) {
+                // Compute over the FULL usable prototype area, not just the
+                // bounding box: segmentation masks legitimately extend beyond
+                // the box (fingers, ears, edges). The v6 restriction clipped
+                // real mesh at box corners/edges - the exact gap the user saw.
+                for (y in 0 until usableProtoH) {
+                    for (x in 0 until usableProtoW) {
                         val px = x + maskPadX
                         val py = y + maskPadY
                         if (px < 0 || px >= protoW || py < 0 || py >= protoH) continue
