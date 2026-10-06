@@ -618,23 +618,12 @@ class MainActivity : AppCompatActivity() {
     private fun configureFullscreen() {
         // Edge-to-edge: the app draws BEHIND the system bars so the status bar
         // area shares the app background (no dead black strip), while
-        // notifications stay visible. The root layout applies inset padding.
+        // notifications stay visible. Padding is handled declaratively by
+        // android:fitsSystemWindows on the root layout - no insets API needed.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.insetsController?.systemBarsBehavior =
             WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
-
-        val root = findViewById<View>(R.id.rootLayout)
-        // Platform insets listener (API 30+; minSdk is 31, so no compat needed).
-        root.setOnApplyInsetsListener { view, insets ->
-            // Pad the top for the (visible, translucent) status bar and the
-            // bottom for the gesture navigation bar.
-            val bars = insets.getInsets(
-                android.view.WindowInsets.Type.systemBars() or
-                    android.view.WindowInsets.Type.displayCutout()
-            )
-            view.setPadding(0, bars.top, 0, bars.bottom)
-        }
     }
 }
