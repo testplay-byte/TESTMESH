@@ -1,29 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Crash screen (v2 - redesigned per user feedback).
+
+  Layout contract:
+  - "SOMETHING WENT WRONG" sits tight at the top (no dead space above)
+  - The log console is a rounded panel; COPY LOG is a small button at its
+    top-right corner
+  - Bottom action bar: CLOSE bottom-left, RESTART bottom-right, both fully
+    rounded (pill-styled corners), RESTART visually dominant (lime)
+-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#0A0A0C"
+    android:fitsSystemWindows="true"
     android:orientation="vertical"
-    android:padding="24dp">
+    android:paddingStart="20dp"
+    android:paddingEnd="20dp"
+    android:paddingTop="18dp"
+    android:paddingBottom="18dp">
 
-    <!-- Title block, app-styled -->
+    <!-- Title block, tight to the top -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:text="SOMETHING WENT WRONG"
+        android:text="Something went wrong"
         android:textColor="#FF6B4A"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        android:letterSpacing="0.1"/>
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:text="The app hit an unexpected error. You can copy the technical log below to share it, or restart."
-        android:textColor="#94A3B8"
-        android:textSize="13sp"/>
+        android:textSize="22sp"
+        android:textStyle="bold"/>
 
     <TextView
         android:id="@+id/tvCrashTime"
@@ -31,63 +35,113 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:textColor="#64748B"
-        android:textSize="11sp"/>
+        android:textSize="12sp"/>
 
-    <!-- Scrollable stack trace console -->
-    <ScrollView
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text="Copy the log below to share what happened."
+        android:textColor="#94A3B8"
+        android:textSize="12sp"/>
+
+    <!-- Rounded log console with COPY LOG pinned at its top-right -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="16dp"
-        android:background="#111827">
+        android:layout_marginTop="14dp"
+        android:background="@drawable/bg_crash_console"
+        android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/tvCrashBody"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:padding="12dp"
-            android:textColor="#E2E8F0"
-            android:textSize="11sp"
-            android:textIsSelectable="true"/>
-    </ScrollView>
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="14dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="10dp"
+            android:paddingBottom="2dp">
 
-    <!-- Actions -->
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="ERROR LOG"
+                android:textColor="#64748B"
+                android:textSize="10sp"
+                android:textAllCaps="true"
+                android:letterSpacing="0.2"/>
+
+            <TextView
+                android:id="@+id/btnCopy"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_btn_copy"
+                android:clickable="true"
+                android:focusable="true"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="6dp"
+                android:text="Copy"
+                android:textColor="#0B0B0D"
+                android:textSize="12sp"
+                android:textStyle="bold"/>
+        </LinearLayout>
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1">
+
+            <TextView
+                android:id="@+id/tvCrashBody"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:padding="14dp"
+                android:textColor="#CBD5E1"
+                android:textSize="11sp"
+                android:textIsSelectable="true"/>
+        </ScrollView>
+    </LinearLayout>
+
+    <!-- Bottom bar: CLOSE left, RESTART right, both fully rounded -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/btnCopy"
+        <TextView
+            android:id="@+id/btnClose"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginEnd="6dp"
-            android:backgroundTint="#1F2937"
-            android:text="COPY LOG"
-            android:textColor="#FFFFFF"/>
+            android:background="@drawable/bg_btn_dark_round"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:paddingVertical="14dp"
+            android:text="Close"
+            android:textColor="#94A3B8"
+            android:textSize="15sp"/>
 
-        <Button
+        <TextView
             android:id="@+id/btnRestart"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginStart="6dp"
-            android:layout_marginEnd="6dp"
-            android:backgroundTint="#BCF362"
-            android:text="RESTART"
-            android:textColor="#0B0B0D"/>
-
-        <Button
-            android:id="@+id/btnClose"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="6dp"
-            android:backgroundTint="#1F2937"
-            android:text="CLOSE"
-            android:textColor="#FFFFFF"/>
+            android:background="@drawable/bg_btn_lime_round"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:paddingVertical="14dp"
+            android:text="Restart App"
+            android:textColor="#0B0B0D"
+            android:textSize="15sp"
+            android:textStyle="bold"/>
     </LinearLayout>
 </LinearLayout>

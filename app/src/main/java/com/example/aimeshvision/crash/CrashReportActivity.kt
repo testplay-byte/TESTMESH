@@ -6,8 +6,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.example.aimeshvision.MainActivity
 import com.example.aimeshvision.R
@@ -62,12 +62,13 @@ class CrashReportActivity : AppCompatActivity() {
             .format(Date())
         tvBody.text = trace
 
-        findViewById<Button>(R.id.btnCopy).setOnClickListener {
+        findViewById<TextView>(R.id.btnCopy).setOnClickListener {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("AI-MESH-FLOW crash report", trace))
+            Toast.makeText(this, "Log copied", Toast.LENGTH_SHORT).show()
         }
 
-        findViewById<Button>(R.id.btnRestart).setOnClickListener {
+        findViewById<TextView>(R.id.btnRestart).setOnClickListener {
             // Fresh task: the old (crashed) process state is never reused.
             startActivity(
                 Intent(this, MainActivity::class.java)
@@ -76,6 +77,6 @@ class CrashReportActivity : AppCompatActivity() {
             finish()
         }
 
-        findViewById<Button>(R.id.btnClose).setOnClickListener { finishAffinity() }
+        findViewById<TextView>(R.id.btnClose).setOnClickListener { finishAffinity() }
     }
 }

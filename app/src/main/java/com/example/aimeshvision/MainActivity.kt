@@ -205,10 +205,12 @@ class MainActivity : AppCompatActivity() {
         useGpu = prefs.getBoolean(PREF_USE_GPU, true)
         modelManager.confidenceThreshold = prefs.getFloat(PREF_CONF, ModelManager.DEFAULT_CONFIDENCE)
         modelManager.nmsIouThreshold = prefs.getFloat(PREF_IOU, ModelManager.DEFAULT_IOU)
+
+        // Views must be bound BEFORE any view property is touched.
+        bindViews()
+        updateModelNameHeader()
         overlayView.showBoxes = prefs.getBoolean(PREF_SHOW_BOXES, true)
         overlayView.showSmoothOutline = prefs.getBoolean(PREF_SMOOTH, false)
-
-        bindViews()
 
         imagePagerAdapter = ImagePagerAdapter()
         imagePager.adapter = imagePagerAdapter
