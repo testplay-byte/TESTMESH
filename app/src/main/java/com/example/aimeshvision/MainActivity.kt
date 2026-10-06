@@ -627,17 +627,16 @@ class MainActivity : AppCompatActivity() {
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
 
-        findViewById<View>(R.id.rootLayout).let { root ->
-            ViewCompat.setOnApplyInsetsListener(root) { view, insets ->
-                // Pad the top for the (visible, translucent) status bar and the
-                // bottom for the gesture navigation bar.
-                val bars = insets.getInsets(
-                    WindowInsetsCompat.Type.systemBars() or
-                        WindowInsetsCompat.Type.displayCutout()
-                )
-                view.setPadding(0, bars.top, 0, bars.bottom)
-                insets
-            }
+        val root = findViewById<View>(R.id.rootLayout)
+        ViewCompat.setOnApplyInsetsListener(root) { view, insets ->
+            // Pad the top for the (visible, translucent) status bar and the
+            // bottom for the gesture navigation bar.
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(0, bars.top, 0, bars.bottom)
+            insets
         }
     }
 }
