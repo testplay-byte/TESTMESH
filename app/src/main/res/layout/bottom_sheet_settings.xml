@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="#111827"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="ENGINE SETTINGS"
+        android:textColor="#E5E7EB"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.1"
+        android:layout_marginBottom="24dp"/>
+
+    <!-- Model Selection Section -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="MODEL CONFIGURATION"
+        android:textColor="#94A3B8"
+        android:textSize="10sp"
+        android:textAllCaps="true"
+        android:letterSpacing="0.2"
+        android:layout_marginBottom="8dp"/>
+
+    <LinearLayout
+        android:id="@+id/panelSelectModel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_glass_btn"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp"
+        android:layout_marginBottom="20dp">
+
+        <ImageView
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:src="@drawable/ic_tune"
+            android:layout_marginEnd="16dp"/>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Swap Active Model"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"/>
+            <TextView
+                android:id="@+id/tvCurrentModelName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="No model selected"
+                android:textColor="#BCF362"
+                android:textSize="12sp"/>
+        </LinearLayout>
+        
+        <ImageView
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:src="@drawable/ic_upload"
+            android:alpha="0.5"/>
+    </LinearLayout>
+
+    <!-- GPU Toggle Section -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="HARDWARE ACCELERATION"
+        android:textColor="#94A3B8"
+        android:textSize="10sp"
+        android:textAllCaps="true"
+        android:letterSpacing="0.2"
+        android:layout_marginBottom="8dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_glass_btn"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <ImageView
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:src="@drawable/ic_play_arrow"
+            android:layout_marginEnd="16dp"
+            android:rotation="-90"/>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Enable GPU Processing"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"/>
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Use NPU/GPU for inference"
+                android:textColor="#94A3B8"
+                android:textSize="12sp"/>
+        </LinearLayout>
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchGpu"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            app:thumbTint="#BCF362"
+            app:trackTint="#1F2937"
+            xmlns:app="http://schemas.android.com/apk/res-auto"/>
+    </LinearLayout>
+
+    <!-- Inference Thresholds Section (F10: user-adjustable) -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="INFERENCE THRESHOLDS"
+        android:textColor="#94A3B8"
+        android:textSize="10sp"
+        android:textAllCaps="true"
+        android:letterSpacing="0.2"
+        android:layout_marginTop="20dp"
+        android:layout_marginBottom="8dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_glass_btn"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:layout_marginBottom="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Confidence"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <SeekBar
+                android:id="@+id/seekConf"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="95"
+                android:progress="35"/>
+
+            <TextView
+                android:id="@+id/tvConfValue"
+                android:layout_width="48dp"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text="35%"
+                android:textColor="#BCF362"
+                android:textSize="13sp"/>
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="NMS Overlap (IoU)"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <SeekBar
+                android:id="@+id/seekIou"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="90"
+                android:progress="45"/>
+
+            <TextView
+                android:id="@+id/tvIouValue"
+                android:layout_width="48dp"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text="45%"
+                android:textColor="#BCF362"
+                android:textSize="13sp"/>
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Higher confidence = fewer, more certain detections."
+            android:textColor="#94A3B8"
+            android:textSize="11sp"/>
+    </LinearLayout>
+
+</LinearLayout>
