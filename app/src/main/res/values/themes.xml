@@ -1,20 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-        Fullscreen no-action-bar theme using the AppCompat base theme.
-        AppCompatActivity requires an AppCompat-derived parent; we extend
-        Theme.AppCompat.NoActionBar and override all visual aspects to
-        achieve the pure-black technical aesthetic.
+        Dark no-action-bar theme on the Material Components base so Material
+        widgets (Slider, BottomSheetDialog) inflate safely. Visuals stay the
+        custom black/lime look.
 
-        windowLayoutInDisplayCutoutMode="shortEdges" allows the camera
-        preview to extend under the display cutout (notch) area.
+        System bars are NOT hidden: the status bar shows notifications over
+        the app background color, and the activity pads itself for the insets.
     -->
-    <style name="Theme.AIMeshVision" parent="Theme.AppCompat.NoActionBar">
+    <style name="Theme.AIMeshVision" parent="Theme.MaterialComponents.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
-        <item name="android:windowFullscreen">true</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
-        <item name="android:statusBarColor">@android:color/black</item>
-        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:statusBarColor">#0A0A0C</item>
+        <item name="android:navigationBarColor">#0A0A0C</item>
         <item name="android:colorPrimary">@android:color/black</item>
         <item name="android:colorPrimaryDark">@android:color/black</item>
         <item name="android:colorAccent">#00FF00</item>

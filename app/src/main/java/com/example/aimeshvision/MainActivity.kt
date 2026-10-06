@@ -11,6 +11,9 @@ import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.view.WindowInsetsController
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -85,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnPauseResume: ImageView
     private lateinit var btnSettings: LinearLayout
     private lateinit var tvLiveLabel: TextView
+    private lateinit var tvModelName: TextView
     private lateinit var indicatorDot: View
     private lateinit var tvConfidence: TextView
     private lateinit var tvLatency: TextView
@@ -111,6 +115,7 @@ class MainActivity : AppCompatActivity() {
             onResult = { file ->
                 currentModelFilename = file.name
                 prefs.edit().putString(PREF_MODEL_FILENAME, file.name).apply()
+                updateModelNameHeader()
                 overlayView.clear()
                 val mode = if (useGpu) "GPU" else "CPU"
                 updateBadge("MODEL LOADED ($mode)", false, "#135bec")
@@ -236,6 +241,7 @@ class MainActivity : AppCompatActivity() {
         btnPauseResume = findViewById(R.id.btnPauseResume)
         btnSettings = findViewById(R.id.btnSettings)
         tvLiveLabel = findViewById(R.id.tvLiveLabel)
+        tvModelName = findViewById(R.id.tvModelName)
         indicatorDot = findViewById(R.id.indicatorDot)
         tvConfidence = findViewById(R.id.tvConfidence)
         tvLatency = findViewById(R.id.tvLatency)
@@ -266,6 +272,7 @@ class MainActivity : AppCompatActivity() {
                 if (ready) {
                     currentModelFilename = name
                     prefs.edit().putString(PREF_MODEL_FILENAME, name).apply()
+                    updateModelNameHeader()
                     val source = if (wasSaved) "MODEL READY" else "MODEL READY (BUNDLED)"
                     updateBadge(source, false, "#4ADE80")
                 } else {
@@ -431,7 +438,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSettingsSheet() {
         val dialog = BottomSheetDialog(this)
-        val view = layoutInflater.inflate(R.layout.bottom_sheet_settings, null)
+        // The sheet builds a lot of UI from resources; any inflation problem
+        // surfaces here as a badge instead of taking the app down.
+        val view = try {
+            layoutInflater.inflate(R.layout.bottom_sheet_settings, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Settings sheet inflation failed", e)
+            updateBadge("ERR: SETTINGS UI", false, "#EF4444")
+            return
+        }
 
         val tvModelName = view.findViewById<TextView>(R.id.tvCurrentModelName)
         val panelSelect = view.findViewById<LinearLayout>(R.id.panelSelectModel)
@@ -572,6 +587,14 @@ class MainActivity : AppCompatActivity() {
         tvLatency.text = "---"
     }
 
+    /**
+     * Top-center header shows the active model; the LIVE FEED badge sits under
+     * it (both centered, per the new top layout).
+     */
+    private fun updateModelNameHeader() {
+        tvModelName.text = currentModelFilename ?: "BUNDLED MODEL"
+    }
+
     private fun updateBadge(text: String, isBlinking: Boolean, colorHex: String) {
         engine.onMain { updateBadgeUI(text, isBlinking, colorHex) }
     }
@@ -595,13 +618,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun configureFullscreen() {
-        window.insetsController?.let { controller ->
-            controller.hide(
-                android.view.WindowInsets.Type.statusBars() or
-                    android.view.WindowInsets.Type.navigationBars()
-            )
-            controller.systemBarsBehavior =
-                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        // Edge-to-edge: the app draws BEHIND the system bars so the status bar
+        // area shares the app background (no dead black strip), while
+        // notifications stay visible. The root layout applies inset padding.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.insetsController?.systemBarsBehavior =
+            WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+
+        findViewById<View>(R.id.rootLayout).let { root ->
+            ViewCompat.setOnApplyInsetsListener(root) { view, insets ->
+                // Pad the top for the (visible, translucent) status bar and the
+                // bottom for the gesture navigation bar.
+                val bars = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() or
+                        WindowInsetsCompat.Type.displayCutout()
+                )
+                view.setPadding(0, bars.top, 0, bars.bottom)
+                insets
+            }
         }
     }
 }

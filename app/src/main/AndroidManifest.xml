@@ -30,6 +30,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Crash screen runs in its own process so a dying main process
+             cannot take it down before the user reads/copies the report. -->
+        <activity
+            android:name=".crash.CrashReportActivity"
+            android:exported="false"
+            android:process=":crash"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.AIMeshVision" />
+
     </application>
 
 </manifest>
