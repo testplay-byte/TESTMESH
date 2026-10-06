@@ -85,8 +85,8 @@
                 android:orientation="horizontal"
                 android:visibility="gone" />
 
-            <!-- The Mesh Canvas Layer -->
-            <com.example.aimeshvision.OverlayView
+            <!-- The Mesh Canvas Layer (class moved to the ui/ package in v2) -->
+            <com.example.aimeshvision.ui.OverlayView
                 android:id="@+id/overlayView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
