@@ -18,7 +18,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.SwitchCompat
+import com.google.android.material.switchmaterial.SwitchMaterial
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -73,8 +73,10 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var isPaused = false
     @Volatile private var useGpu = true
 
-    /** True while the settings sheet is open - camera inference pauses. */
+    /** True while the settings sheet is open - camera unbinds + inference pauses. */
     @Volatile private var settingsOpen = false
+    private var camera: android.hardware.camera2.CameraDevice? = null
+    private var cameraProvider: ProcessCameraProvider? = null
     private var currentModelFilename: String? = null
     private val modelLoading = AtomicBoolean(false)
 
@@ -93,6 +95,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvLiveLabel: TextView
     private lateinit var tvModelName: TextView
     private lateinit var tvLoading: TextView
+    private lateinit var tvModelDetails: TextView
+    private lateinit var classChipsRow: LinearLayout
     private lateinit var indicatorDot: View
     private lateinit var tvConfidence: TextView
     private lateinit var tvLatency: TextView
@@ -123,6 +127,7 @@ class MainActivity : AppCompatActivity() {
                 prefs.edit().putString(PREF_MODEL_FILENAME, file.name).apply()
                 updateModelNameHeader()
                 overlayView.clear()
+                overlayView.resetSmoothing()
                 val mode = if (useGpu) "GPU" else "CPU"
                 updateBadge("MODEL LOADED ($mode)", false, "#135bec")
                 resetStats()
@@ -254,6 +259,8 @@ class MainActivity : AppCompatActivity() {
         tvLiveLabel = findViewById(R.id.tvLiveLabel)
         tvModelName = findViewById(R.id.tvModelName)
         tvLoading = findViewById(R.id.tvLoading)
+        tvModelDetails = findViewById(R.id.tvModelDetails)
+        classChipsRow = findViewById(R.id.classChipsRow)
         indicatorDot = findViewById(R.id.indicatorDot)
         tvConfidence = findViewById(R.id.tvConfidence)
         tvLatency = findViewById(R.id.tvLatency)
@@ -327,7 +334,8 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             try {
                 // F2 fixed: the future itself is now guarded.
-                val cameraProvider = cameraProviderFuture.get()
+                val provider = cameraProviderFuture.get()
+                cameraProvider = provider
 
                 val preview = Preview.Builder()
                     .setTargetAspectRatio(androidx.camera.core.AspectRatio.RATIO_4_3)
@@ -340,8 +348,8 @@ class MainActivity : AppCompatActivity() {
                     .build()
                     .also { it.setAnalyzer(engine.executorService, InferenceAnalyzer()) }
 
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
+                provider.unbindAll()
+                provider.bindToLifecycle(
                     this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis,
                 )
             } catch (e: Exception) {
@@ -349,6 +357,19 @@ class MainActivity : AppCompatActivity() {
                 updateBadge("CAM ERROR", false, "#EF4444")
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /** Fully unbinds the camera (true pause: sensor + analyzer stop). */
+    private fun pauseCamera() {
+        try { cameraProvider?.unbindAll() } catch (e: Exception) {
+            Log.w(TAG, "pauseCamera unbind failed", e)
+        }
+    }
+
+    /** Re-binds the camera after [pauseCamera]. */
+    private fun resumeCamera() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED) startCamera()
     }
 
     private inner class InferenceAnalyzer : ImageAnalysis.Analyzer {
@@ -463,18 +484,28 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val tvModelName = view.findViewById<TextView>(R.id.tvCurrentModelName)
-        val panelSelect = view.findViewById<LinearLayout>(R.id.panelSelectModel)
-        val switchGpu = view.findViewById<SwitchCompat>(R.id.switchGpu)
-        val switchBoxes = view.findViewById<SwitchCompat>(R.id.switchBoxes)
-        val switchSmooth = view.findViewById<SwitchCompat>(R.id.switchSmooth)
+        val panelSelect = view.findViewById<TextView>(R.id.panelSelectModel)
+        val switchGpu = view.findViewById<SwitchMaterial>(R.id.switchGpu)
+        val switchBoxes = view.findViewById<SwitchMaterial>(R.id.switchBoxes)
+        val switchSmooth = view.findViewById<SwitchMaterial>(R.id.switchSmooth)
         val sliderConf = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderConf)
         val tvConfValue = view.findViewById<TextView>(R.id.tvConfValue)
         val sliderIou = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderIou)
         val tvIouValue = view.findViewById<TextView>(R.id.tvIouValue)
 
-        tvModelName.text = currentModelFilename ?: "Bundled (default)"
         switchGpu.isChecked = useGpu
+
+        // Material switch styling: lime thumb/track when checked (app accent).
+        listOf(switchGpu, switchBoxes, switchSmooth).forEach { sw ->
+            sw.thumbTintList = android.content.res.ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(0xFF0B0B0D.toInt(), 0xFF94A3B8.toInt())
+            )
+            sw.trackTintList = android.content.res.ColorStateList(
+                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                intArrayOf(0xFFBCF362.toInt(), 0xFF243044.toInt())
+            )
+        }
 
         // Display options: persisted, applied live to the overlay.
         switchBoxes.isChecked = overlayView.showBoxes
@@ -514,12 +545,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // While the sheet is open, pause live inference so the camera feed
-        // and CPU/GPU are free; dismiss resumes automatically.
+        // While the sheet is open the camera is FULLY unbound (sensor +
+        // analyzer stop, not just inference skip); dismiss re-binds it.
         settingsOpen = true
+        pauseCamera()
         dialog.setOnDismissListener {
             settingsOpen = false
-            updateBadge("LIVE FEED", true, "#4ADE80")
+            if (!isPaused) {
+                resumeCamera()
+                updateBadge("LIVE FEED", true, "#4ADE80")
+            }
         }
 
         panelSelect.setOnClickListener {
@@ -541,6 +576,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.setContentView(view)
+        // Keep our very-round sheet background: transparent behind + our
+        // rounded drawable is drawn by the sheet root itself.
+        dialog.window?.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+            ?.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         dialog.show()
     }
 
@@ -599,12 +638,54 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Top-center header shows the active model; the LIVE FEED badge sits under
-     * it (both centered, per the new top layout). "Bundled (default)" makes it
-     * clear the preloaded model is the factory default, not a user pick.
+     * Top bar: model name sits top-RIGHT (badge is top-left). Under the badge
+     * a details line shows input resolution · model size, and a scrollable
+     * row of class chips shows every class the model knows with its mesh color.
      */
     private fun updateModelNameHeader() {
         tvModelName.text = currentModelFilename ?: "Bundled (default)"
+
+        val res = "${modelManager.inputWidth}×${modelManager.inputHeight}"
+        val mb = modelManager.modelFileSizeBytes / (1024f * 1024f)
+        tvModelDetails.text = "$res · %.1f MB".format(mb)
+
+        buildClassChips()
+    }
+
+    /** Rebuilds the class-chip row from the current model's labels. */
+    private fun buildClassChips() {
+        classChipsRow.removeAllViews()
+        val labels = modelManager.classLabels
+        if (labels.isEmpty()) {
+            classChipsRow.visibility = View.GONE
+            return
+        }
+        classChipsRow.visibility = View.VISIBLE
+        val dp6 = (6 * resources.displayMetrics.density).toInt()
+        val dp4 = (4 * resources.displayMetrics.density).toInt()
+        labels.forEachIndexed { index, label ->
+            val color = com.example.aimeshvision.ui.DetectionStyle.colorFor(index)
+            val chip = TextView(this).apply {
+                text = label.uppercase()
+                setTextColor(color)
+                textSize = 10f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                letterSpacing = 0.1f
+                setPadding(dp6 * 2, dp4, dp6 * 2, dp4)
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(0x14111111)  // faint dark base
+                    setStroke(dp4 / 2, (color and 0x00FFFFFF) or 0x50000000.toInt())
+                    cornerRadius = dp6 * 3f
+                }
+            }
+            classChipsRow.addView(chip)
+            (chip.layoutParams as? LinearLayout.LayoutParams)?.let {
+                it.marginEnd = dp4
+                chip.layoutParams = it
+            } ?: run { chip.layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp4 } }
+        }
     }
 
     /**

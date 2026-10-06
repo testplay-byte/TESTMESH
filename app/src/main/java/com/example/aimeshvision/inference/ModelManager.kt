@@ -71,6 +71,9 @@ class ModelManager {
 
     val isReady: Boolean get() = !closed.get() && interpreter != null
 
+    /** Size of the loaded model file in bytes (0 when nothing is loaded). */
+    val modelFileSizeBytes: Long get() = currentModelFile?.length() ?: 0L
+
     /** Callback for runtime GPU → CPU fallback events (UI badge hook). */
     var onGpuFallback: ((reason: String) -> Unit)? = null
 

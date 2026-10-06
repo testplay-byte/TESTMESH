@@ -9,35 +9,21 @@
     android:fitsSystemWindows="true"
     android:padding="16dp">
 
-    <!-- Top-center header: active model name above the LIVE FEED badge -->
-    <TextView
-        android:id="@+id/tvModelName"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:fontFamily="sans-serif-medium"
-        android:letterSpacing="0.08"
-        android:text="BUNDLED MODEL"
-        android:textColor="#BCF362"
-        android:textSize="12sp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"/>
-
-    <!-- LIVE FEED badge, centered under the model name -->
+    <!-- ── TOP SECTION ─────────────────────────────────────────────────────
+         Row 1: LIVE FEED badge (left) · model name (right)
+         Row 2: model details "512×512 · 11.1 MB"
+         Row 3: horizontally scrollable class chips with mesh colors -->
     <LinearLayout
         android:id="@+id/badgeLayout"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
         android:background="@drawable/bg_badge"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingHorizontal="16dp"
+        android:paddingHorizontal="14dp"
         android:paddingVertical="6dp"
-        app:layout_constraintTop_toBottomOf="@id/tvModelName"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
 
         <View
             android:id="@+id/indicatorDot"
@@ -58,23 +44,68 @@
             android:textStyle="bold" />
     </LinearLayout>
 
+    <TextView
+        android:id="@+id/tvModelName"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:ellipsize="start"
+        android:maxLines="1"
+        android:fontFamily="sans-serif-medium"
+        android:letterSpacing="0.05"
+        android:text="Bundled (default)"
+        android:textColor="#BCF362"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"/>
+
+    <TextView
+        android:id="@+id/tvModelDetails"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:fontFamily="sans-serif-medium"
+        android:letterSpacing="0.1"
+        android:text="— · —"
+        android:textColor="#64748B"
+        android:textSize="10sp"
+        app:layout_constraintTop_toBottomOf="@id/badgeLayout"
+        app:layout_constraintStart_toStartOf="parent"/>
+
+    <HorizontalScrollView
+        android:id="@+id/classChipsScroll"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:scrollbars="none"
+        app:layout_constraintTop_toBottomOf="@id/tvModelDetails"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <LinearLayout
+            android:id="@+id/classChipsRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"/>
+    </HorizontalScrollView>
+
     <!-- Model-loading indicator: appears center-top while a model parses -->
     <TextView
         android:id="@+id/tvLoading"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:background="@drawable/bg_badge"
         android:fontFamily="sans-serif-medium"
         android:letterSpacing="0.15"
         android:paddingHorizontal="16dp"
         android:paddingVertical="6dp"
-        android:text="LOADING MODEL…"
+        android:text="LOADING MODEL..."
         android:textColor="#F59E0B"
         android:textSize="10sp"
         android:textStyle="bold"
         android:visibility="gone"
-        app:layout_constraintTop_toBottomOf="@id/badgeLayout"
+        app:layout_constraintTop_toBottomOf="@id/classChipsScroll"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"/>
 
@@ -88,7 +119,7 @@
         app:cardBackgroundColor="#0F172A"
         app:cardCornerRadius="24dp"
         app:cardElevation="0dp"
-        app:layout_constraintTop_toBottomOf="@id/badgeLayout"
+        app:layout_constraintTop_toBottomOf="@id/tvLoading"
         app:layout_constraintBottom_toTopOf="@id/bottomCard"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
