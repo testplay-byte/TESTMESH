@@ -6,6 +6,19 @@ android {
     namespace = "com.example.aimeshvision"
     compileSdk = 36
 
+    // Signing: a stable project keystore committed with the repo, so every
+    // build (debug AND release) is signed with the same key and APKs install
+    // as updates over each other. Fine for a personal tool; rotate before
+    // any public release.
+    signingConfigs {
+        create("projectKey") {
+            storeFile = rootProject.file("app/aimeshvision.keystore")
+            storePassword = "aimeshvision2026"
+            keyAlias = "aimeshvision"
+            keyPassword = "aimeshvision2026"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.example.aimeshvision"
         minSdk = 31
@@ -21,8 +34,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("projectKey")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("projectKey")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

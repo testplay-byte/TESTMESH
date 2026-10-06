@@ -29,8 +29,19 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
 
+      # Release variant uses the same committed keystore, so the APK installs
+      # as an update over previous installs (stable signing key).
+      - name: Build release APK
+        run: ./gradlew assembleRelease --stacktrace
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: AIMESHVISION-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIMESHVISION-release
+          path: app/build/outputs/apk/release/app-release.apk

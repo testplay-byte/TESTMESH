@@ -19,18 +19,23 @@ import kotlin.math.sqrt
 /**
  * Full-screen canvas that maps normalized detections onto screen space.
  *
- * Rendering pipeline per detection:
- *  1. The segmentation mask (tinted with the class color) — when the smooth
- *     outline is on, the mask is CLIPPED to the traced outline so no mask
- *     pixels leak outside the border line.
- *  2. Optional bounding box with corner brackets (user-toggleable).
- *  3. Optional smooth outline: the mask silhouette is contour-traced,
- *     temporally smoothed across frames (EMA), resampled, and converted to
- *     quadratic-bezier curves → a fluid line that hugs the object. Stroke
- *     color is the class color, made vibrant + opaque (never white).
- *  4. Label chip — anchored to the top edge of the object (mask top when
- *     boxes are hidden), its position temporally smoothed so it glides
- *     instead of jittering.
+ * ARCHITECTURE NOTE (v4): all per-frame analysis (contour tracing, resampling,
+ * temporal smoothing) happens ONCE in [setResults] and is cached in
+ * [PreparedItem]s. [onDraw] only draws cached geometry - it never traces,
+ * allocates pixel arrays, or touches the smoothing state. The v3 version did
+ * the analysis inside onDraw (multiple draws per frame, UI-thread jank) and
+ * fed mask-pixel coordinates into screen math un-normalized, which produced
+ * a wildly off-screen outline path whose clip erased the mask entirely.
+ *
+ * Rendering per detection:
+ *  1. Smooth outline ON: tinted mask clipped to the traced silhouette (no
+ *     mesh outside the line) + vibrant opaque class-color bezier border.
+ *     If tracing fails, the plain tinted mask is drawn - the mesh NEVER
+ *     disappears because of the outline feature.
+ *  2. Smooth outline OFF: plain tinted mask.
+ *  3. Optional bounding box + corner brackets (user toggle).
+ *  4. Label chip: box top when boxes are shown; the temporally smoothed top
+ *     edge of the actual silhouette when they are hidden.
  */
 class OverlayView @JvmOverloads constructor(
     context: Context,
@@ -51,16 +56,25 @@ class OverlayView @JvmOverloads constructor(
         private const val MASK_ALPHA = 110
         private const val OUTLINE_STROKE_W = 5f
 
-        // ── contour tracing ─────────────────────────────────────────────
+        // ── contour pipeline ─────────────────────────────────────────────
         private const val CONTOUR_STEP = 2        // pixel stride while tracing
-        private const val RESAMPLE_POINTS = 48    // control points around the silhouette
+        private const val RESAMPLE_POINTS = 48    // points around the silhouette
         private const val SIMPLIFY_TOLERANCE = 2.0f
 
-        // ── temporal smoothing (EMA) ────────────────────────────────────
-        // Higher SMOOTHING = calmer line/label; 0 = raw per-frame values.
+        // ── temporal smoothing (EMA) ─────────────────────────────────────
+        // 0 = raw per-frame values; higher = calmer line/label.
         private const val SMOOTHING = 0.45f
         private const val MAX_TRACK_DISTANCE = 0.35f // normalized; beyond = re-acquire
     }
+
+    /** A detection with all per-frame geometry precomputed in [setResults]. */
+    private class PreparedItem(
+        val det: Detection,
+        /** Smoothed contour, normalized 0..1 in mask space (null = none). */
+        val contour: List<Pair<Float, Float>>?,
+        /** Smoothed top edge of the silhouette, normalized 0..1 (null = none). */
+        val labelAnchorNorm: Float?,
+    )
 
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -90,9 +104,8 @@ class OverlayView @JvmOverloads constructor(
         typeface = Typeface.DEFAULT_BOLD
         style = Paint.Style.FILL
     }
-    private val clipPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    private var detections: List<Detection> = emptyList()
+    private var prepared: List<PreparedItem> = emptyList()
     private var sourceImageWidth: Int = 640
     private var sourceImageHeight: Int = 640
 
@@ -100,36 +113,129 @@ class OverlayView @JvmOverloads constructor(
     var showBoxes: Boolean = true
     var showSmoothOutline: Boolean = false
 
-    // ── temporal state: one smoothed contour + label anchor per class id ─────
-    private data class Smoothed(
-        val points: Array<Pair<Float, Float>>,   // normalized mask-space coords (outline)
-        val labelAnchor: Float?,                 // normalized top-edge Y (label)
+    // ── temporal state: smoothed contour + label anchor per class id ─────────
+    // The first detection of a class drives the track; extra same-class
+    // detections (two cats in frame) render from their raw contour.
+    private class Track(
+        val points: Array<Pair<Float, Float>>,
+        var labelAnchor: Float?,
     )
 
-    private val tracks = mutableMapOf<Int, Smoothed>()
+    private val tracks = mutableMapOf<Int, Track>()
 
-    /** Updates detections and triggers a redraw. */
+    /**
+     * Called once per inference result: precomputes all geometry, updates the
+     * temporal tracks, then requests a draw. Cheap draws follow.
+     */
     fun setResults(results: List<Detection>, inputWidth: Int, inputHeight: Int) {
-        detections = results
         sourceImageWidth = inputWidth
         sourceImageHeight = inputHeight
+
+        val seenClasses = mutableSetOf<Int>()
+        val items = ArrayList<PreparedItem>(results.size)
+        for (det in results) {
+            val mask = det.maskBitmap
+            var contour: List<Pair<Float, Float>>? = null
+            var anchor: Float? = null
+
+            if (mask != null) {
+                val firstOfClass = seenClasses.add(det.classId)
+                val raw = traceContour(mask)
+                if (!raw.isNullOrEmpty()) {
+                    val resampled = resampleClosed(raw, RESAMPLE_POINTS)
+                    // NORMALIZE to 0..1 mask space - screen mapping happens in
+                    // onDraw. (v3 bug: mask pixels were used as if normalized.)
+                    val norm = resampled.map { (p) ->
+                        (p.first / mask.width) to (p.second / mask.height)
+                    }
+                    if (firstOfClass) {
+                        contour = emaContour(det.classId, norm)
+                        anchor = emaAnchor(det.classId, mask)
+                    } else {
+                        contour = norm
+                        anchor = rawTopNorm(mask)
+                    }
+                }
+            }
+            items.add(PreparedItem(det, contour, anchor))
+        }
+        prepared = items
         invalidate()
     }
 
     fun clear() {
-        detections = emptyList()
+        prepared = emptyList()
         invalidate()
     }
 
     /** Forgets all temporal smoothing state (e.g. when the model changes). */
     fun resetSmoothing() {
         tracks.clear()
+        prepared = emptyList()
         invalidate()
     }
 
+    // ── temporal smoothing ────────────────────────────────────────────────────
+
+    /** EMA-blends the raw (normalized) contour with the previous track. */
+    private fun emaContour(
+        classId: Int, raw: List<Pair<Float, Float>>,
+    ): List<Pair<Float, Float>> {
+        val prev = tracks[classId]
+        val out: List<Pair<Float, Float>> =
+            if (prev == null || prev.points.size != raw.size) {
+                raw
+            } else {
+                ArrayList(raw.size).also { list ->
+                    for (i in raw.indices) {
+                        val px = prev.points[i].first
+                        val py = prev.points[i].second
+                        val nx = raw[i].first
+                        val ny = raw[i].second
+                        val dist = sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
+                        list.add(
+                            if (dist > MAX_TRACK_DISTANCE) nx to ny   // jump = re-acquire
+                            else px + (nx - px) * (1f - SMOOTHING) to
+                                py + (ny - py) * (1f - SMOOTHING)
+                        )
+                    }
+                }
+            }
+        tracks[classId] = Track(out.toTypedArray(), prev?.labelAnchor)
+        return out
+    }
+
+    /** EMA-blends the label anchor (top edge Y, normalized) across frames. */
+    private fun emaAnchor(classId: Int, mask: Bitmap): Float? {
+        val raw = rawTopNorm(mask) ?: return null
+        val prev = tracks[classId]?.labelAnchor
+        val smoothed = if (prev == null || abs(raw - prev) > MAX_TRACK_DISTANCE) {
+            raw
+        } else {
+            prev + (raw - prev) * (1f - SMOOTHING)
+        }
+        tracks[classId]?.labelAnchor = smoothed
+        return smoothed
+    }
+
+    /** Topmost opaque row of the mask as a 0..1 fraction of its height. */
+    private fun rawTopNorm(mask: Bitmap): Float? {
+        val w = mask.width
+        val px = IntArray(w)
+        for (y in 0 until mask.height) {
+            mask.getPixels(px, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                if (px[x] != 0) return y.toFloat() / mask.height
+            }
+        }
+        return null
+    }
+
+    // ── drawing (cached geometry only) ────────────────────────────────────────
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (detections.isEmpty()) return
+        if (prepared.isEmpty()) return
 
         // fitCenter mapping between the source image and this view.
         val scaleX = width.toFloat() / sourceImageWidth
@@ -140,7 +246,8 @@ class OverlayView @JvmOverloads constructor(
         val offsetX = (width - scaledW) / 2f
         val offsetY = (height - scaledH) / 2f
 
-        for (det in detections) {
+        for (item in prepared) {
+            val det = item.det
             val classColor = DetectionStyle.colorFor(det.classId)
 
             val left = det.boundingBox.left * scaledW + offsetX
@@ -152,14 +259,26 @@ class OverlayView @JvmOverloads constructor(
             val mask = det.maskBitmap
             if (mask != null) {
                 val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
+                val path = if (showSmoothOutline && item.contour != null) {
+                    buildSmoothPath(item.contour, maskRect)
+                } else null
 
-                if (showSmoothOutline) {
-                    drawSmoothMesh(canvas, det, mask, maskRect, classColor)
+                if (path != null) {
+                    // 1. Mask strictly INSIDE the outline: clip to the traced
+                    //    silhouette so no mesh pixel leaks past the line.
+                    val save = canvas.save()
+                    canvas.clipPath(path)
+                    drawTintedMask(canvas, mask, maskRect, classColor)
+                    canvas.restoreToCount(save)
+
+                    // 2. Vibrant, opaque class-color border on top.
+                    outlinePaint.color = DetectionStyle.vibrantFor(classColor)
+                    outlinePaint.alpha = 255
+                    canvas.drawPath(path, outlinePaint)
                 } else {
-                    maskPaint.colorFilter =
-                        PorterDuffColorFilter(classColor, PorterDuff.Mode.SRC_IN)
-                    maskPaint.alpha = MASK_ALPHA
-                    canvas.drawBitmap(mask, null, maskRect, maskPaint)
+                    // Outline off (or no traceable silhouette): plain mask -
+                    // the mesh is never lost because of the outline feature.
+                    drawTintedMask(canvas, mask, maskRect, classColor)
                 }
             }
 
@@ -170,111 +289,54 @@ class OverlayView @JvmOverloads constructor(
                 drawCorners(canvas, screenRect, classColor)
                 drawLabel(canvas, screenRect, det, classColor, anchorTop = screenRect.top)
             } else {
-                // No box: the label anchors to the smoothed top edge of the
+                // No box: anchor the label to the smoothed top edge of the
                 // actual object silhouette so it sits ON the object.
-                val anchorTop = smoothedMaskTopY(det, offsetX, offsetY, scaledW, scaledH)
+                val anchorTop = item.labelAnchorNorm?.let { offsetY + it * scaledH }
                     ?: screenRect.top
                 drawLabel(canvas, screenRect, det, classColor, anchorTop = anchorTop)
             }
         }
     }
 
-    // ── smooth mesh: trace → smooth → clip mask → vibrant outline ────────────
-
-    private fun drawSmoothMesh(
-        canvas: Canvas, det: Detection, mask: Bitmap, maskRect: RectF, classColor: Int,
+    private fun drawTintedMask(
+        canvas: Canvas, mask: Bitmap, maskRect: RectF, classColor: Int,
     ) {
-        val raw = traceContour(mask)
-        if (raw.isNullOrEmpty()) {
-            // No traceable silhouette - fall back to the plain tinted mask.
-            maskPaint.colorFilter = PorterDuffColorFilter(classColor, PorterDuff.Mode.SRC_IN)
-            maskPaint.alpha = MASK_ALPHA
-            canvas.drawBitmap(mask, null, maskRect, maskPaint)
-            return
-        }
-
-        // Temporal EMA against the previous frame's contour for this class.
-        val smoothed = smoothContour(det.classId, raw)
-
-        // Build the bezier path in screen space.
-        val path = Path()
-        val pts = FloatArray(smoothed.size * 2)
-        for (i in smoothed.indices) {
-            pts[i * 2] = maskRect.left + smoothed[i].first * maskRect.width()
-            pts[i * 2 + 1] = maskRect.top + smoothed[i].second * maskRect.height()
-        }
-        buildClosedBezier(path, pts)
-
-        // 1. Mask strictly INSIDE the outline: tint the mask, then clip it to
-        //    the traced silhouette so no mesh pixel leaks past the line.
-        val save = canvas.save()
-        canvas.clipPath(path)
         maskPaint.colorFilter = PorterDuffColorFilter(classColor, PorterDuff.Mode.SRC_IN)
         maskPaint.alpha = MASK_ALPHA
         canvas.drawBitmap(mask, null, maskRect, maskPaint)
-        canvas.restoreToCount(save)
-
-        // 2. Vibrant, opaque class-color border on top.
-        outlinePaint.color = DetectionStyle.vibrantFor(classColor)
-        outlinePaint.alpha = 255
-        canvas.drawPath(path, outlinePaint)
     }
 
-    /** EMA-blends the raw contour with the previous frame's smoothed contour. */
-    private fun smoothContour(classId: Int, raw: List<Pair<Int, Int>>): List<Pair<Float, Float>> {
-        val resampled = resampleClosed(raw, RESAMPLE_POINTS)
-        val prev = tracks[classId]?.points
-
-        val out = ArrayList<Pair<Float, Float>>(resampled.size)
-        if (prev == null || prev.size != resampled.size) {
-            out.addAll(resampled.map { it.first to it.second })
-        } else {
-            for (i in resampled.indices) {
-                val px = prev[i].first
-                val py = prev[i].second
-                val nx = resampled[i].first
-                val ny = resampled[i].second
-                val dist = sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
-                out.add(
-                    if (dist > MAX_TRACK_DISTANCE) nx to ny   // jump = re-acquire
-                    else px + (nx - px) * (1f - SMOOTHING) to
-                        py + (ny - py) * (1f - SMOOTHING)
-                )
-            }
+    /** Builds the closed bezier outline from normalized contour points. */
+    private fun buildSmoothPath(
+        contour: List<Pair<Float, Float>>, maskRect: RectF,
+    ): Path {
+        val pts = FloatArray(contour.size * 2)
+        for (i in contour.indices) {
+            pts[i * 2] = maskRect.left + contour[i].first * maskRect.width()
+            pts[i * 2 + 1] = maskRect.top + contour[i].second * maskRect.height()
         }
-        tracks[classId] = Smoothed(out.toTypedArray(), tracks[classId]?.labelAnchor)
-        return out
-    }
+        val path = Path()
 
-    /** EMA-blends the label anchor Y so the chip glides instead of jittering. */
-    private fun smoothedMaskTopY(
-        det: Detection, offsetX: Float, offsetY: Float, scaledW: Float, scaledH: Float,
-    ): Float? {
-        val mask = det.maskBitmap ?: return null
-        var topRow = -1
-        val w = mask.width
-        val px = IntArray(w)
-        outer@ for (y in 0 until mask.height) {
-            mask.getPixels(px, 0, w, 0, y, w, 1)
-            for (x in 0 until w) {
-                if (px[x] != 0) { topRow = y; break@outer }
-            }
+        // Midpoints between consecutive points become on-curve anchors; the
+        // original points become control points - smooth-curve technique.
+        val n = contour.size
+        val mids = FloatArray(n * 2)
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            mids[i * 2] = (pts[i * 2] + pts[j * 2]) / 2f
+            mids[i * 2 + 1] = (pts[i * 2 + 1] + pts[j * 2 + 1]) / 2f
         }
-        if (topRow < 0) return null
-
-        // Raw top edge in normalized mask space.
-        val rawNorm = topRow.toFloat() / mask.height
-        val prev = tracks[det.classId]?.labelAnchor
-        val smoothed = if (prev == null || abs(rawNorm - prev) > MAX_TRACK_DISTANCE) {
-            rawNorm
-        } else {
-            prev + (rawNorm - prev) * (1f - SMOOTHING)
+        path.reset()
+        path.moveTo(mids[0], mids[1])
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            path.quadTo(
+                pts[j * 2], pts[j * 2 + 1],      // control = real contour point
+                mids[j * 2], mids[j * 2 + 1],    // anchor   = midpoint
+            )
         }
-        tracks[det.classId] = Smoothed(
-            tracks[det.classId]?.points ?: emptyArray(),
-            smoothed,
-        )
-        return offsetY + smoothed * scaledH
+        path.close()
+        return path
     }
 
     /**
@@ -287,7 +349,6 @@ class OverlayView @JvmOverloads constructor(
     ): List<Pair<Float, Float>> {
         if (contour.size < 3) return contour.map { it.first.toFloat() to it.second.toFloat() }
 
-        // Total perimeter.
         var total = 0f
         val dist = FloatArray(contour.size)
         for (i in contour.indices) {
@@ -322,37 +383,6 @@ class OverlayView @JvmOverloads constructor(
             )
         }
         return out
-    }
-
-    /**
-     * Converts a closed polyline of screen-space points into a smooth path of
-     * quadratic bezier segments (midpoint technique): corners become gentle
-     * curves, sharp features that the object actually has are preserved
-     * because the control points sit on the real contour.
-     */
-    private fun buildClosedBezier(path: Path, pts: FloatArray) {
-        val n = pts.size / 2
-        if (n < 3) return
-
-        // Midpoints between consecutive points become on-curve anchors; the
-        // original points become control points - classic smooth-curve trick.
-        val mids = FloatArray(n * 2)
-        for (i in 0 until n) {
-            val j = (i + 1) % n
-            mids[i * 2] = (pts[i * 2] + pts[j * 2]) / 2f
-            mids[i * 2 + 1] = (pts[i * 2 + 1] + pts[j * 2 + 1]) / 2f
-        }
-
-        path.reset()
-        path.moveTo(mids[0], mids[1])
-        for (i in 0 until n) {
-            val j = (i + 1) % n
-            path.quadTo(
-                pts[j * 2], pts[j * 2 + 1],      // control = real contour point
-                mids[j * 2], mids[j * 2 + 1],    // anchor   = midpoint
-            )
-        }
-        path.close()
     }
 
     /**
@@ -404,7 +434,7 @@ class OverlayView @JvmOverloads constructor(
 
         if (contour.size < 8) return null
 
-        // Distance-based simplification for a cleaner input to the resampler.
+        // Distance-based simplification for a cleaner resampler input.
         val simplified = ArrayList<Pair<Int, Int>>(contour.size / 2 + 4)
         var lastX = -1; var lastY = -1
         for (p in contour) {

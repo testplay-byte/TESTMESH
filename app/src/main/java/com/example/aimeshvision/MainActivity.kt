@@ -18,7 +18,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import com.google.android.material.switchmaterial.SwitchMaterial
+import com.example.aimeshvision.ui.IOSToggle
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -473,7 +473,9 @@ class MainActivity : AppCompatActivity() {
     // ── settings ──────────────────────────────────────────────────────────────
 
     private fun showSettingsSheet() {
-        val dialog = BottomSheetDialog(this)
+        // Theme carries the rounded bottomSheetStyle, so the Material
+        // backdrop matches our 28dp corners (no square-corner ghosting).
+        val dialog = BottomSheetDialog(this, R.style.Theme_AIMeshVision_Sheet)
         // The sheet builds a lot of UI from resources; any inflation problem
         // surfaces here as a badge instead of taking the app down.
         val view = try {
@@ -485,38 +487,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         val panelSelect = view.findViewById<TextView>(R.id.panelSelectModel)
-        val switchGpu = view.findViewById<SwitchMaterial>(R.id.switchGpu)
-        val switchBoxes = view.findViewById<SwitchMaterial>(R.id.switchBoxes)
-        val switchSmooth = view.findViewById<SwitchMaterial>(R.id.switchSmooth)
+        val toggleGpu = view.findViewById<IOSToggle>(R.id.toggleGpu)
+        val toggleBoxes = view.findViewById<IOSToggle>(R.id.toggleBoxes)
+        val toggleSmooth = view.findViewById<IOSToggle>(R.id.toggleSmooth)
         val sliderConf = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderConf)
         val tvConfValue = view.findViewById<TextView>(R.id.tvConfValue)
         val sliderIou = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderIou)
         val tvIouValue = view.findViewById<TextView>(R.id.tvIouValue)
 
-        switchGpu.isChecked = useGpu
-
-        // Material switch styling: lime thumb/track when checked (app accent).
-        listOf(switchGpu, switchBoxes, switchSmooth).forEach { sw ->
-            sw.thumbTintList = android.content.res.ColorStateList(
-                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
-                intArrayOf(0xFF0B0B0D.toInt(), 0xFF94A3B8.toInt())
-            )
-            sw.trackTintList = android.content.res.ColorStateList(
-                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
-                intArrayOf(0xFFBCF362.toInt(), 0xFF243044.toInt())
-            )
-        }
+        toggleGpu.setCheckedSilent(useGpu)
 
         // Display options: persisted, applied live to the overlay.
-        switchBoxes.isChecked = overlayView.showBoxes
-        switchBoxes.setOnCheckedChangeListener { _, isChecked ->
-            overlayView.showBoxes = isChecked
-            prefs.edit().putBoolean(PREF_SHOW_BOXES, isChecked).apply()
+        toggleBoxes.setCheckedSilent(overlayView.showBoxes)
+        toggleBoxes.onCheckedChangeListener = { checked ->
+            overlayView.showBoxes = checked
+            prefs.edit().putBoolean(PREF_SHOW_BOXES, checked).apply()
         }
-        switchSmooth.isChecked = overlayView.showSmoothOutline
-        switchSmooth.setOnCheckedChangeListener { _, isChecked ->
-            overlayView.showSmoothOutline = isChecked
-            prefs.edit().putBoolean(PREF_SMOOTH, isChecked).apply()
+        toggleSmooth.setCheckedSilent(overlayView.showSmoothOutline)
+        toggleSmooth.onCheckedChangeListener = { checked ->
+            overlayView.showSmoothOutline = checked
+            prefs.edit().putBoolean(PREF_SMOOTH, checked).apply()
         }
 
         // F10 fixed: confidence + IoU are user-adjustable, persisted, and applied live.
@@ -562,7 +552,7 @@ class MainActivity : AppCompatActivity() {
             modelPickerLauncher.launch("*/*")
         }
 
-        switchGpu.setOnCheckedChangeListener { _, isChecked ->
+        toggleGpu.onCheckedChangeListener = { isChecked ->
             useGpu = isChecked
             prefs.edit().putBoolean(PREF_USE_GPU, useGpu).apply()
             val mode = if (useGpu) "GPU" else "CPU"
@@ -576,10 +566,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.setContentView(view)
-        // Keep our very-round sheet background: transparent behind + our
-        // rounded drawable is drawn by the sheet root itself.
-        dialog.window?.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
-            ?.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         dialog.show()
     }
 

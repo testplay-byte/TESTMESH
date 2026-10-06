@@ -1,17 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Settings bottom sheet (v4).
+  Settings bottom sheet (v5).
 
-  Design rules from user feedback (round 5):
-  - Much rounder top corners on the sheet itself (rounded background + clip)
-  - Modern Material switches (SwitchMaterial, bigger, proper Material styling)
-  - Toggle rows are compact (single-line height, no dead vertical space)
-  - "Swap Active Model" is a CENTERED button, only as wide as its text/icon;
-    the current model name is NOT shown here (the top bar shows it)
-  - Threshold sliders each get their OWN full-width row, stacked vertically
+  Design rules from user feedback (round 6):
+  - Swap Active Model: SOLID green (lime) button, centered, hugs content
+  - iOS-style custom toggles (IOSToggle view), NOT material switches
+  - Toggle rows: minimal height (just the content, no extra padding)
+  - Threshold sliders: each on its own row, thicker track
+  - Sheet background is fully rounded (drawn by bg_sheet_rounded; the dialog
+    window backdrop is transparent so no square-corner ghosting)
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="@drawable/bg_sheet_rounded"
@@ -36,23 +37,24 @@
         android:layout_marginBottom="10dp"
         android:background="#1F2937"/>
 
-    <!-- Centered swap-model button: hugs its content -->
+    <!-- Centered solid-lime swap-model button -->
     <TextView
         android:id="@+id/panelSelectModel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center_horizontal"
-        android:background="@drawable/bg_model_swap"
+        android:background="@drawable/bg_btn_lime_round"
         android:clickable="true"
         android:focusable="true"
         android:drawableStart="@drawable/ic_upload"
         android:drawablePadding="10dp"
-        android:drawableTint="#BCF362"
-        android:paddingHorizontal="22dp"
+        android:drawableTint="#0B0B0D"
+        android:paddingHorizontal="24dp"
         android:paddingVertical="12dp"
         android:text="Swap Active Model"
-        android:textColor="#FFFFFF"
-        android:textSize="14sp"/>
+        android:textColor="#0B0B0D"
+        android:textSize="14sp"
+        android:textStyle="bold"/>
 
     <!-- ── DISPLAY: two compact toggle rows ──────────────────────────────── -->
     <TextView
@@ -63,7 +65,7 @@
         android:textSize="10sp"
         android:textAllCaps="true"
         android:letterSpacing="0.2"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="12dp"
         android:layout_marginBottom="4dp"/>
 
     <LinearLayout
@@ -73,7 +75,7 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingHorizontal="14dp"
-        android:paddingVertical="6dp">
+        android:paddingVertical="8dp">
 
         <TextView
             android:layout_width="0dp"
@@ -83,8 +85,8 @@
             android:textColor="#FFFFFF"
             android:textSize="14sp"/>
 
-        <com.google.android.material.switchmaterial.SwitchMaterial
-            android:id="@+id/switchBoxes"
+        <com.example.aimeshvision.ui.IOSToggle
+            android:id="@+id/toggleBoxes"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"/>
     </LinearLayout>
@@ -97,7 +99,7 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingHorizontal="14dp"
-        android:paddingVertical="6dp">
+        android:paddingVertical="8dp">
 
         <TextView
             android:layout_width="0dp"
@@ -107,8 +109,8 @@
             android:textColor="#FFFFFF"
             android:textSize="14sp"/>
 
-        <com.google.android.material.switchmaterial.SwitchMaterial
-            android:id="@+id/switchSmooth"
+        <com.example.aimeshvision.ui.IOSToggle
+            android:id="@+id/toggleSmooth"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"/>
     </LinearLayout>
@@ -122,7 +124,7 @@
         android:textSize="10sp"
         android:textAllCaps="true"
         android:letterSpacing="0.2"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="12dp"
         android:layout_marginBottom="4dp"/>
 
     <LinearLayout
@@ -132,7 +134,7 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingHorizontal="14dp"
-        android:paddingVertical="6dp">
+        android:paddingVertical="8dp">
 
         <TextView
             android:layout_width="0dp"
@@ -142,8 +144,8 @@
             android:textColor="#FFFFFF"
             android:textSize="14sp"/>
 
-        <com.google.android.material.switchmaterial.SwitchMaterial
-            android:id="@+id/switchGpu"
+        <com.example.aimeshvision.ui.IOSToggle
+            android:id="@+id/toggleGpu"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"/>
     </LinearLayout>
@@ -157,7 +159,7 @@
         android:textSize="10sp"
         android:textAllCaps="true"
         android:letterSpacing="0.2"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="12dp"
         android:layout_marginBottom="4dp"/>
 
     <LinearLayout
@@ -166,7 +168,7 @@
         android:background="@drawable/bg_glass_btn"
         android:orientation="vertical"
         android:paddingHorizontal="16dp"
-        android:paddingTop="8dp"
+        android:paddingTop="10dp"
         android:paddingBottom="2dp">
 
         <LinearLayout
@@ -205,7 +207,9 @@
             android:stepSize="1"
             android:value="35"
             app:labelBehavior="gone"
-            app:tickVisible="false"/>
+            app:tickVisible="false"
+            app:trackHeight="8dp"
+            app:thumbRadius="9dp"/>
     </LinearLayout>
 
     <LinearLayout
@@ -215,7 +219,7 @@
         android:background="@drawable/bg_glass_btn"
         android:orientation="vertical"
         android:paddingHorizontal="16dp"
-        android:paddingTop="8dp"
+        android:paddingTop="10dp"
         android:paddingBottom="2dp">
 
         <LinearLayout
@@ -254,7 +258,9 @@
             android:stepSize="1"
             android:value="45"
             app:labelBehavior="gone"
-            app:tickVisible="false"/>
+            app:tickVisible="false"
+            app:trackHeight="8dp"
+            app:thumbRadius="9dp"/>
     </LinearLayout>
 
 </LinearLayout>
