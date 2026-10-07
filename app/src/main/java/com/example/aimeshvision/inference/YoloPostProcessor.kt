@@ -23,6 +23,10 @@ class YoloPostProcessor(
 
     companion object {
         private const val FLOAT_BYTES = 4
+
+        // Stage 1A: this many detections get full-frame mask decode; the rest
+        // fall back to bbox-only (full frame costs ~524k MACs per detection).
+        private const val MAX_FULL_DECODE = 6
         private const val MASK_COEFFS = 32   // YOLO-seg prototype coefficient count
         private const val MIN_BOXES = 3      // a sane box tensor has >= 3 feature rows
     }
@@ -225,12 +229,18 @@ class YoloPostProcessor(
         protoBuffer.asFloatBuffer().get(protoData)
 
         // PERF: one scratch array reused across detections. It MUST be zeroed
-        // per detection: the write loop covers only the bbox area, and stale
-        // 0xFFFFFFFF pixels from a previous detection would bleed into this
-        // detection's bitmap (reviewer-found contamination bug).
+        // per detection: stale 0xFFFFFFFF pixels from a previous detection
+        // would bleed into this detection's bitmap (reviewer-found bug).
         val pixels = IntArray(usableProtoW * usableProtoH)
 
-        for (det in detections) {
+        // Stage 1A (accuracy): masks decode over the FULL usable proto area -
+        // the old bbox-crop structurally dropped real mask protrusions beyond
+        // the box (fingertips, points). Full decode costs ~524k MACs/det, so
+        // detections beyond MAX_FULL_DECODE fall back to bbox-only decode.
+        val tDecodeStart = android.os.SystemClock.elapsedRealtime()
+        val fullDecodeCount = detections.size.coerceAtMost(MAX_FULL_DECODE)
+
+        for ((detIdx, det) in detections.withIndex()) {
             try {
                 val coeffs = det.maskCoefficients ?: continue
                 if (coeffs.size != protoC) continue
@@ -238,13 +248,19 @@ class YoloPostProcessor(
                 java.util.Arrays.fill(pixels, 0)
                 val mask = Bitmap.createBitmap(usableProtoW, usableProtoH, Bitmap.Config.ARGB_8888)
 
+                // Bbox bounds for the bbox-only fallback path.
                 val boxL = (det.boundingBox.left * usableProtoW).toInt().coerceIn(0, usableProtoW - 1)
                 val boxT = (det.boundingBox.top * usableProtoH).toInt().coerceIn(0, usableProtoH - 1)
                 val boxR = (det.boundingBox.right * usableProtoW).toInt().coerceIn(0, usableProtoW - 1)
                 val boxB = (det.boundingBox.bottom * usableProtoH).toInt().coerceIn(0, usableProtoH - 1)
 
-                for (y in boxT..boxB) {
-                    for (x in boxL..boxR) {
+                val yStart = if (detIdx < fullDecodeCount) 0 else boxT
+                val yEnd = if (detIdx < fullDecodeCount) usableProtoH - 1 else boxB
+                val xStart = if (detIdx < fullDecodeCount) 0 else boxL
+                val xEnd = if (detIdx < fullDecodeCount) usableProtoW - 1 else boxR
+
+                for (y in yStart..yEnd) {
+                    for (x in xStart..xEnd) {
                         val px = x + maskPadX
                         val py = y + maskPadY
                         if (px < 0 || px >= protoW || py < 0 || py >= protoH) continue
@@ -271,6 +287,15 @@ class YoloPostProcessor(
                 // A single bad detection never takes down the batch (F7).
                 det.maskBitmap = null
             }
+        }
+
+        // Stage 1A perf gate: one log line per decode pass so the full-frame
+        // cost is measured, not guessed. Remove once validated.
+        val decodeMs = android.os.SystemClock.elapsedRealtime() - tDecodeStart
+        if (decodeMs > 2) {
+            android.util.Log.i("YoloPostProcessor",
+                "decodeMasks: ${detections.size} det(s) in ${decodeMs}ms " +
+                    "(full-frame for $fullDecodeCount)")
         }
     }
 
