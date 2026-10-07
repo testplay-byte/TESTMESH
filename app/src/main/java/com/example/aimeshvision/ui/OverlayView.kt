@@ -19,25 +19,30 @@ import kotlin.math.sqrt
 /**
  * Full-screen canvas that maps normalized detections onto screen space.
  *
- * ARCHITECTURE NOTE (v9 - border dots): the outline is built from BORDER
- * DOTS - every solid mask pixel that touches a background pixel is a dot -
- * which are then chained nearest-to-nearest and connected. This is the user's
- * explicit model ("dots around the borders which connect with the nearest
- * dot around them") and it fixes both v8 complaints:
+ * ARCHITECTURE NOTE (contour tracing): the outline is a TRUE boundary
+ * contour of each connected mask blob, obtained by:
  *
- *  1. POINTY TIPS: v8 compressed the whole contour to 48 arc-length points,
- *     which averaged sharp corners away. Dots sit on the ACTUAL border
- *     pixels, so every point is represented exactly.
- *  2. MISSING BORDER: the Moore-neighborhood tracer could fail (holes,
- *     odd shapes) leaving mesh with no border. Dot extraction is a per-pixel
- *     classification - if the mesh exists, its dots exist. Failure-proof.
+ *  1. 4-connected component labelling of the solid mask pixels (one contour
+ *     per blob - multi-hand scenes get one outline per hand);
+ *  2. Moore-neighbour boundary tracing of each component, which walks EVERY
+ *     border pixel in order (no sampling holes, sharp fingertips preserved);
+ *  3. Douglas-Peucker simplification (~1.3 mask px) to remove the pixel
+ *     staircase while keeping genuine corners;
+ *  4. arc-length resampling to a FIXED point count so consecutive frames have
+ *     a stable, index-aligned correspondence for temporal smoothing.
  *
- * The chained dots are then smoothed (EMA per dot index + midpoint-bezier
- * through the chained sequence) so the line keeps the smooth stroke look.
- * All analysis runs once per frame in [setResults]; [onDraw] only draws.
+ * This replaces the earlier "border dot grid" approach, which sampled only
+ * odd-odd pixel coordinates and therefore MISSED most of the boundary on any
+ * shallow curve (a circle yielded 48 of 228 border pixels) - the walk then
+ * hit gaps it was not allowed to cross and the outline fragmented or vanished.
+ *
+ * Contours are closed by construction, so they are always safe clip regions.
+ * The contour is drawn as a smooth midpoint-quadratic curve and used to clip
+ * the tinted mask; a vibrant stroke is drawn on top. All analysis runs once
+ * per frame in [setResults]; [onDraw] only draws.
  *
  * Rendering per detection:
- *  1. Smooth outline ON: tinted mesh clipped to the line + vibrant stroke.
+ *  1. Smooth outline ON: tinted mesh clipped to the contour + vibrant stroke.
  *  2. Smooth outline OFF: plain tinted mesh.
  *  3. Optional bounding box + corner brackets (user toggle).
  *  4. Label chip: box top when boxes are shown; the temporally smoothed top
@@ -61,11 +66,20 @@ class OverlayView @JvmOverloads constructor(
         private const val LABEL_CORNER_R = 14f
         private const val MASK_ALPHA = 110
 
-        // ── border dots ──────────────────────────────────────────────────
-        // Grid step: dots are sampled every N mask pixels on the border, and
-        // each connects to its nearest neighbors. 2 on a ~128px mask gives a
-        // dense but cheap dot set (~hundreds), preserving sharp points.
-        private const val DOT_GRID_STEP = 2
+        // ── contour extraction ───────────────────────────────────────────
+        // Ignore tiny blobs: below this many solid pixels a component is
+        // mask noise, not an object outline.
+        private const val MIN_CONTOUR_PX = 12
+
+        // Douglas-Peucker tolerance in MASK pixels: removes the 1px pixel
+        // staircase while keeping real corners/fingertips (~1% of a 128px
+        // proto mask).
+        private const val DP_EPSILON = 1.3f
+
+        // Every contour is resampled to this many points by arc length, so
+        // consecutive frames index-align for smooth temporal blending and the
+        // path cost is bounded regardless of mask size.
+        private const val CONTOUR_POINTS = 72
 
         private const val LINE_STROKE_W = 5f     // screen px (old look)
 
@@ -82,14 +96,6 @@ class OverlayView @JvmOverloads constructor(
         // first-dot proximity gate (normalized) guarding every correspondence.
         private const val MAX_SECONDARY_EMA = 2   // primary + 2 secondary = top 3
         private const val FIRST_DOT_GATE = 0.03f
-
-        // Mask-space closure gap threshold: 4 mask px (2 grid steps), squared.
-        private const val CLOSE_GAP2_MASK = 16f
-
-        // Max single walk step in mask px (~1.5 grid steps): with subpixel
-        // lerp, extreme soft-edge dots can round 2 cells away - only allow
-        // such steps when the real pixel distance stays small.
-        private const val MAX_STEP_PX = 3.0
     }
 
     /** A detection with its per-frame geometry precomputed in [setResults]. */
@@ -201,69 +207,76 @@ class OverlayView @JvmOverloads constructor(
             assignments[det]?.let { it.lastFrame = frameCounter }
 
             if (mask != null) {
-                val raw = extractBorderDots(mask)
-                if (raw != null && raw.size >= 8) {
-                    // EVERY chain becomes its own outline (multi-blob masks).
-                    val normChains = chainNearest(raw).map { chain ->
-                        chain.map { p ->
-                            (p.first / mask.width.toFloat()) to
-                                (p.second / mask.height.toFloat())
+                // One closed contour per connected blob, normalized 0..1,
+                // sorted biggest-first.
+                val normContours = extractContours(mask)
+                if (normContours.isNotEmpty()) {
+                    val inst = assignments[det]
+                    val outContours = ArrayList<List<Pair<Float, Float>>>(normContours.size)
+                    // Secondary tracks for the NEXT frame, in current chain
+                    // order (index 0 = primary).
+                    val nextTracks = ArrayList<Track?>(normContours.size)
+
+                    // Primary (biggest blob): match to the instance's primary
+                    // track, guarded by equal length + first-point proximity.
+                    val primary = normContours[0]
+                    val primaryPrev = inst?.track
+                    val primaryOk = primaryPrev != null &&
+                        primaryPrev.points.size == primary.size &&
+                        firstDotClose(primaryPrev.points, primary)
+                    val primarySmoothed = if (primaryOk) emaSoft(primaryPrev!!, primary) else primary
+                    anchor = if (inst != null && primaryOk) {
+                        emaAnchor(inst, primarySmoothed)
+                    } else primarySmoothed.minOfOrNull { it.second }
+                    outContours.add(primarySmoothed)
+                    nextTracks.add(Track(primarySmoothed.toTypedArray(), null))
+
+                    // Secondary blobs: match each to the nearest UNUSED previous
+                    // secondary track by first-point distance (NOT by sorted
+                    // index - two similar blobs can swap size order between
+                    // frames, which would blend one blob's track into another).
+                    val prevSec = inst?.secondary
+                    val secUsed = BooleanArray(prevSec?.size ?: 0)
+                    for (ci in 1 until normContours.size) {
+                        val chain = normContours[ci]
+                        var bestK = -1
+                        var bestD = FIRST_DOT_GATE
+                        if (prevSec != null) {
+                            for (k in prevSec.indices) {
+                                if (secUsed[k]) continue
+                                val t = prevSec[k] ?: continue
+                                if (t.points.size != chain.size) continue
+                                val d = firstDotDist(t.points, chain)
+                                if (d <= bestD) { bestD = d; bestK = k }
+                            }
+                        }
+                        val prev = if (bestK >= 0) prevSec!![bestK] else null
+                        if (bestK >= 0) secUsed[bestK] = true
+                        val correspondable = prev != null &&
+                            prev.points.size == chain.size && firstDotClose(prev.points, chain)
+                        val smoothed = if (correspondable) emaSoft(prev!!, chain) else chain
+                        outContours.add(smoothed)
+                        if (ci <= MAX_SECONDARY_EMA) {
+                            nextTracks.add(Track(smoothed.toTypedArray(), null))
                         }
                     }
-                    if (normChains.isNotEmpty()) {
-                        // Stage 2C: the longest chain EMA's against the
-                        // instance's primary track; the next MAX_SECONDARY_EMA
-                        // chains EMA against per-index secondary tracks. All
-                        // correspondences are guarded: same length + first dot
-                        // within FIRST_DOT_GATE (normalized) - otherwise that
-                        // chain renders raw this frame.
-                        val inst = assignments[det]
-                        val outChains = ArrayList<List<Pair<Float, Float>>>(normChains.size)
-                        val secTracks = ArrayList<Track?>(normChains.size)
+                    chains = outContours
 
-                        normChains.forEachIndexed { ci, chain ->
-                            val isPrimary = ci == 0   // chains arrive sorted desc by size
-                            val prevTrack = when {
-                                inst == null -> null
-                                isPrimary -> inst.track
-                                else -> inst.secondary.getOrNull(ci - 1)
-                            }
-                            val correspondable =
-                                prevTrack != null && prevTrack.points.size == chain.size &&
-                                firstDotClose(prevTrack.points, chain)
-                            val smoothed = if (correspondable) {
-                                emaSoft(prevTrack!!, chain)
-                            } else chain
-                            if (isPrimary) {
-                                anchor = if (inst != null && correspondable) {
-                                    emaAnchor(inst, smoothed)
-                                } else smoothed.minOfOrNull { it.second }
-                            }
-                            outChains.add(smoothed)
-                            if (ci <= MAX_SECONDARY_EMA) {
-                                secTracks.add(Track(smoothed.toTypedArray(), null))
-                            }
-                        }
-                        chains = outChains
-
-                        if (inst != null) {
-                            inst.box = det.boundingBox
-                            inst.lastFrame = frameCounter
-                            inst.track = secTracks.firstOrNull()
-                            // Resync the secondary list by index.
-                            inst.secondary.clear()
-                            for (k in 1 until secTracks.size) inst.secondary.add(secTracks[k])
-                        } else {
-                            val primary = secTracks.firstOrNull()
-                            val newInst = InstanceTrack(
-                                det.boundingBox, det.classId, primary, frameCounter,
-                            )
-                            for (k in 1 until secTracks.size) newInst.secondary.add(secTracks[k])
-                            instances.add(newInst)
-                        }
+                    if (inst != null) {
+                        inst.box = det.boundingBox
+                        inst.lastFrame = frameCounter
+                        inst.track = nextTracks.firstOrNull()
+                        inst.secondary.clear()
+                        for (k in 1 until nextTracks.size) inst.secondary.add(nextTracks[k])
+                    } else {
+                        val newInst = InstanceTrack(
+                            det.boundingBox, det.classId, nextTracks.firstOrNull(), frameCounter,
+                        )
+                        for (k in 1 until nextTracks.size) newInst.secondary.add(nextTracks[k])
+                        instances.add(newInst)
                     }
                 } else if (assignments[det] != null) {
-                    // Mask present but extraction failed: keep the instance
+                    // Mask present but no usable contour: keep the instance
                     // alive so smoothing survives one bad frame.
                     assignments[det]!!.lastFrame = frameCounter
                 }
@@ -292,207 +305,344 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
-    // ── border-dot extraction ─────────────────────────────────────────────────
+    // ── contour extraction ──────────────────────────────────────────────
+
+    // Reusable per-frame scratch for the mask-sized buffers. The mask is
+    // ~128x128 and these run per detection per frame, so allocating them fresh
+    // caused steady young-gen garbage (GC jank at camera frame rates). They
+    // are grown only when the mask size changes.
+    private var scratchN = 0
+    private var pxScratch = IntArray(0)
+    private var solidScratch = BooleanArray(0)
+    private var seenScratch = BooleanArray(0)
+    private var markScratch = BooleanArray(0)
+    private var stackScratch = IntArray(0)
+    private var compScratch = IntArray(0)
+    private var dpScratch = IntArray(0)
 
     /**
-     * Collects border dots: solid mask pixels (on a [DOT_GRID_STEP] grid)
-     * with at least one non-solid 4-neighbor. Per-pixel classification -
-     * cannot "fail to trace" like a walking tracer; if the mesh exists its
-     * dots exist. Returns null only when the mask is empty.
+     * Extracts boundary contours from a decoded mask: one per connected solid
+     * blob, each a closed polygon of normalized (0..1) mask-space points with
+     * a FIXED length ([CONTOUR_POINTS]) for stable temporal correspondence.
+     *
+     * Pipeline per blob: 4-connected labelling -> Moore-neighbour border trace
+     * (visits every border pixel, so fingertips and sharp tips are exact) ->
+     * Douglas-Peucker simplification (kills the pixel staircase) -> canonical
+     * winding + start point -> arc-length resample. Index 0 is then exactly the
+     * same boundary point (topmost-then-leftmost) in every frame; index i is
+     * within the small arc-length drift caused by perimeter change. Returns an
+     * empty list when the mask has no usable blob.
      */
-    private fun extractBorderDots(mask: Bitmap): List<Pair<Float, Float>>? {
+    private fun extractContours(mask: Bitmap): List<List<Pair<Float, Float>>> {
         val w = mask.width
         val h = mask.height
-        if (w < 4 || h < 4) return null
+        if (w < 4 || h < 4) return emptyList()
+        val n = w * h
 
-        val px = IntArray(w * h)
+        if (scratchN < n) {
+            scratchN = n
+            pxScratch = IntArray(n)
+            solidScratch = BooleanArray(n)
+            seenScratch = BooleanArray(n)
+            markScratch = BooleanArray(n)
+            stackScratch = IntArray(n)
+            compScratch = IntArray(n)
+        }
+        val px = pxScratch
+        val solid = solidScratch
+        val seen = seenScratch
+        val mark = markScratch
+        val stack = stackScratch
+        val comp = compScratch
+
         mask.getPixels(px, 0, w, 0, 0, w, h)
-        fun solid(x: Int, y: Int): Boolean =
-            x in 0 until w && y in 0 until h && (px[y * w + x] ushr 24) > 128
-
-        // Stage 1B (subpixel): the alpha byte near the boundary is a local
-        // linearization of sigmoid (alpha ≈ 128 + 64*sum, decode-side), so
-        // the 0.5-level crossing between a solid pixel (alpha aS) and its
-        // background neighbor (alpha aN) sits at t = (aS-128)/(aS-aN) along
-        // that edge. Lerping the dot there removes the 1px quantization of
-        // the old integer dots - corners land at their true positions.
-        fun alpha(x: Int, y: Int): Int =
-            if (x in 0 until w && y in 0 until h) (px[y * w + x] ushr 24) else 0
-
-        fun subpixel(sx: Int, sy: Int): Pair<Float, Float> {
-            val aS = alpha(sx, sy).toFloat()
-            // Neighbors: prefer the background one with the STRONGEST gradient
-            // (largest aS - aN) - the most definitive edge for this pixel.
-            var bestDx = 0f
-            var bestDy = 0f
-            var bestT = 0.5f
-            var bestGrad = -1f
-            val cands = listOf(sx - 1 to sy, sx + 1 to sy, sx to sy - 1, sx to sy + 1)
-            for ((nx, ny) in cands) {
-                val aN = alpha(nx, ny).toFloat()
-                if (aN >= 128f) continue
-                val grad = aS - aN
-                if (grad < 1f) continue
-                val t = ((aS - 128f) / grad).coerceIn(0f, 1f)
-                if (grad > bestGrad) {
-                    bestGrad = grad
-                    bestT = t
-                    bestDx = (nx - sx).toFloat()
-                    bestDy = (ny - sy).toFloat()
-                }
-            }
-            // t is the fraction FROM the solid pixel toward the neighbor
-            // (alpha(sx + t*dx) = 128 exactly). Final reviewer fix: the
-            // previous code used (1 - t), placing weak-edge dots ~1px OUTSIDE.
-            return (sx + bestDx * bestT) to (sy + bestDy * bestT)
+        for (i in 0 until n) {
+            solid[i] = (px[i] ushr 24) > 128
+            seen[i] = false
+            mark[i] = false
         }
 
-        val dots = ArrayList<Pair<Float, Float>>(512)
-        var sy = DOT_GRID_STEP / 2
-        while (sy < h) {
-            var sx = DOT_GRID_STEP / 2
-            while (sx < w) {
-                if (solid(sx, sy) &&
-                    (!solid(sx - 1, sy) || !solid(sx + 1, sy) ||
-                        !solid(sx, sy - 1) || !solid(sx, sy + 1))
-                ) {
-                    dots.add(subpixel(sx, sy))
-                }
-                sx += DOT_GRID_STEP
+        // Contours paired with their blob area, so the biggest blob can be
+        // sorted to index 0 (the "primary" outline for label anchoring).
+        val out = ArrayList<Pair<Int, List<Pair<Float, Float>>>>()
+
+        for (start in 0 until n) {
+            if (!solid[start] || seen[start]) continue
+
+            // 4-connected flood fill of one blob.
+            var sp = 0
+            stack[sp++] = start
+            seen[start] = true
+            var cc = 0
+            while (sp > 0) {
+                val j = stack[--sp]
+                comp[cc++] = j
+                mark[j] = true
+                val x = j % w
+                val y = j / w
+                if (x > 0) { val k = j - 1; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (x < w - 1) { val k = j + 1; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y > 0) { val k = j - w; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y < h - 1) { val k = j + w; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
             }
-            sy += DOT_GRID_STEP
+
+            if (cc < MIN_CONTOUR_PX) {
+                for (i in 0 until cc) mark[comp[i]] = false
+                continue
+            }
+
+            val contour = traceBorder(mark, w, h, comp, cc)
+            // Clear the membership marks for the next blob.
+            for (i in 0 until cc) mark[comp[i]] = false
+            if (contour == null || contour.size < 6) continue
+
+            val simplified = simplifyClosed(contour, DP_EPSILON)
+            if (simplified.size < 3) continue
+
+            // Canonicalize BEFORE resampling: index 0 becomes exactly the same
+            // physical point (topmost, then leftmost) in every frame, so the
+            // arc-length lattice starts from a stable origin and index i maps
+            // to the same boundary location across frames.
+            val canonical = canonicalize(simplified)
+
+            val resampled = resampleClosed(canonical, CONTOUR_POINTS)
+            if (resampled.size < 3) continue
+
+            // Store normalized to 0..1 mask space BEFORE any screen mapping.
+            out.add(cc to resampled.map { p ->
+                (p.first / mask.width.toFloat()) to (p.second / mask.height.toFloat())
+            })
         }
-        return if (dots.isEmpty()) null else dots
+
+        // Biggest blob first: index 0 is the primary outline.
+        out.sortByDescending { it.first }
+        return out.map { it.second }
     }
 
     /**
-     * Orders the dot set into a boundary walk that follows the border
-     * LOCALLY: each step moves to an unused dot within one grid cell in the
-     * 8-neighborhood (Chebyshev distance <= 2), preferring the one that keeps
-     * the walk direction straightest. The chain is forbidden from jumping
-     * across the shape - if no adjacent dot is free, the walk ends (or starts
-     * a new chain elsewhere) rather than forcing a long connection.
+     * Canonicalizes a closed polygon for stable temporal correspondence:
+     * reverses it to a consistent winding (positive signed area) and rotates
+     * it so index 0 is the topmost-then-leftmost point. Without this, the
+     * trace/resample start point drifts frame to frame and the EMA would blend
+     * point i against a spatially unrelated point.
      */
-    private fun chainNearest(dots: List<Pair<Float, Float>>): List<List<Pair<Float, Float>>> {
-        if (dots.size < 3) return emptyList()
+    private fun canonicalize(pts: List<Pair<Float, Float>>): List<Pair<Float, Float>> {
+        val n = pts.size
+        if (n < 3) return pts
+        var area2 = 0f
+        for (i in 0 until n) {
+            val a = pts[i]
+            val b = pts[(i + 1) % n]
+            area2 += a.first * b.second - b.first * a.second
+        }
+        var ring = if (area2 < 0f) pts.reversed() else pts
+        var startIdx = 0
+        for (i in 1 until n) {
+            val y = ring[i].second
+            val y0 = ring[startIdx].second
+            if (y < y0 || (y == y0 && ring[i].first < ring[startIdx].first)) startIdx = i
+        }
+        if (startIdx == 0) return ring
+        return ring.subList(startIdx, n) + ring.subList(0, startIdx)
+    }
 
-        // Grid lookup: dots hashed by ROUNDED integer cell. Subpixel lerp can
-        // shift a dot across its cell boundary, so a cell may hold up to 2
-        // dots - store LISTS; the walk scans every dot in each candidate cell
-        // (final reviewer fix: single-value cells silently DROPPED dots on
-        // diagonal borders, dashing outlines).
-        val maxGx = dots.maxOf { Math.round(it.first / DOT_GRID_STEP) }
-        val maxGy = dots.maxOf { Math.round(it.second / DOT_GRID_STEP) }
-        val grid = HashMap<Long, MutableList<Int>>(dots.size * 2)
-        dots.forEachIndexed { idx, (x, y) ->
-            val cx = Math.round(x / DOT_GRID_STEP)
-            val cy = Math.round(y / DOT_GRID_STEP)
-            if (cx in 0..maxGx && cy in 0..maxGy) {
-                grid.getOrPut(cy.toLong() * (maxGx + 1) + cx) { mutableListOf() }.add(idx)
+    /** 8-neighbour offsets in clockwise order (E, SE, S, SW, W, NW, N, NE). */
+    private val neighbor8 = arrayOf(
+        1 to 0, 1 to 1, 0 to 1, -1 to 1, -1 to 0, -1 to -1, 0 to -1, 1 to -1,
+    )
+
+    /**
+     * Moore-neighbour boundary tracing of one solid component (membership
+     * flagged in [mark]). Starts at the topmost-leftmost pixel, walks
+     * clockwise, and returns the ordered contour pixel list (the start pixel
+     * is not repeated at the end). Returns null if tracing degenerates
+     * (defensive - never throws).
+     */
+    private fun traceBorder(
+        mark: BooleanArray, w: Int, h: Int, comp: IntArray, cc: Int,
+    ): List<Pair<Float, Float>>? {
+        // Start = topmost row, then leftmost column in that row.
+        var minY = Int.MAX_VALUE
+        for (i in 0 until cc) { val y = comp[i] / w; if (y < minY) minY = y }
+        var startX = Int.MAX_VALUE
+        for (i in 0 until cc) { val j = comp[i]; if (j / w == minY) { val x = j % w; if (x < startX) startX = x } }
+
+        val contour = ArrayList<Pair<Float, Float>>(cc)
+        contour.add(startX.toFloat() to minY.toFloat())
+
+        // Backtrack starts at the background pixel west of the start.
+        var bx = startX - 1
+        var by = minY
+        var cx = startX
+        var cy = minY
+        var guard = 0
+        val maxSteps = 8 * cc + 64
+
+        while (guard++ < maxSteps) {
+            val bdx = bx - cx
+            val bdy = by - cy
+            var bi = 0
+            for (i in neighbor8.indices) {
+                if (neighbor8[i].first == bdx && neighbor8[i].second == bdy) { bi = i; break }
+            }
+            var found = false
+            for (k in 1..8) {
+                val di = (bi + k) % 8
+                val nx = cx + neighbor8[di].first
+                val ny = cy + neighbor8[di].second
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+                if (!mark[ny * w + nx]) continue
+                // Backtrack = the cell we scanned just before this neighbour.
+                val pb = (bi + k - 1) % 8
+                bx = cx + neighbor8[pb].first
+                by = cy + neighbor8[pb].second
+                cx = nx
+                cy = ny
+                found = true
+                break
+            }
+            if (!found) break
+            if (cx == startX && cy == minY) break   // closed the loop
+            contour.add(cx.toFloat() to cy.toFloat())
+        }
+        return contour
+    }
+
+    /** Perpendicular distance from p to segment ab. */
+    private fun perpDist(
+        p: Pair<Float, Float>, a: Pair<Float, Float>, b: Pair<Float, Float>,
+    ): Float {
+        val dx = b.first - a.first
+        val dy = b.second - a.second
+        if (dx == 0f && dy == 0f) return sqrt((p.first - a.first) * (p.first - a.first) +
+            (p.second - a.second) * (p.second - a.second))
+        val t = (((p.first - a.first) * dx + (p.second - a.second) * dy) / (dx * dx + dy * dy))
+            .coerceIn(0f, 1f)
+        val projX = a.first + t * dx
+        val projY = a.second + t * dy
+        return sqrt((p.first - projX) * (p.first - projX) + (p.second - projY) * (p.second - projY))
+    }
+
+    /** Iterative Douglas-Peucker on an open polyline. */
+    private fun simplifyOpen(
+        pts: List<Pair<Float, Float>>, eps: Float,
+    ): List<Pair<Float, Float>> {
+        if (pts.size < 3) return pts
+        val keep = BooleanArray(pts.size)
+        keep[0] = true
+        keep[pts.size - 1] = true
+        // Reusable primitive stack of (lo,hi) frames. Each split pops one frame
+        // and pushes two (net +1); with at most n-1 splits and one seed frame,
+        // the depth never exceeds n frames = 2n ints - sized 2n+8 for safety.
+        if (dpScratch.size < pts.size * 2 + 8) dpScratch = IntArray(pts.size * 2 + 8)
+        val dp = dpScratch
+        var top = 0
+        dp[top++] = 0
+        dp[top++] = pts.size - 1
+        while (top > 0) {
+            val hi = dp[--top]
+            val lo = dp[--top]
+            if (hi <= lo + 1) continue
+            var dmax = 0f
+            var idx = -1
+            for (i in lo + 1 until hi) {
+                val d = perpDist(pts[i], pts[lo], pts[hi])
+                if (d > dmax) { dmax = d; idx = i }
+            }
+            if (dmax > eps && idx > 0) {
+                keep[idx] = true
+                dp[top++] = lo
+                dp[top++] = idx
+                dp[top++] = idx
+                dp[top++] = hi
             }
         }
+        val out = ArrayList<Pair<Float, Float>>()
+        for (i in pts.indices) if (keep[i]) out.add(pts[i])
+        return out
+    }
 
-        val used = BooleanArray(dots.size)
-        val chains = ArrayList<List<Pair<Float, Float>>>()
-
-        fun tryChain(startIdx: Int): List<Pair<Float, Float>>? {
-            val chain = ArrayList<Pair<Float, Float>>()
-            var cur = startIdx
-            used[cur] = true
-            chain.add(dots[cur])
-            // Walk direction from the previous step (0,0 at the first step).
-            var dirX = 0f
-            var dirY = 0f
-            while (true) {
-                val cx = dots[cur].first
-                val cy = dots[cur].second
-                val gx = Math.round(cx / DOT_GRID_STEP)
-                val gy = Math.round(cy / DOT_GRID_STEP)
-
-                // Collect unused dots in the 8-neighborhood (Chebyshev <= 1:
-                // with STEP=2, max pixel step is ~2.8px - tight enough to
-                // never jump a border gap or cut a thin corner; reviewer #7).
-                // Subpixel dots: the candidate's cell must match (gx+dx, gy+dy).
-                var bestIdx = -1
-                var bestScore = Double.MAX_VALUE
-                for (dy in -2..2) {
-                    for (dx in -2..2) {
-                        val ngx = gx + dx
-                        val ngy = gy + dy
-                        if (ngx < 0 || ngy < 0 || ngx > maxGx || ngy > maxGy) continue
-                        val key = ngy.toLong() * (maxGx + 1) + ngx
-                        val cellDots = grid[key] ?: continue
-                        for (idx in cellDots) {
-                            if (used[idx]) continue
-                            // Same-cell dots (subpixel stacking) must remain
-                            // connectable: score by the ACTUAL pixel delta,
-                            // not the cell offset (verification-round fix).
-                            val px = dots[idx].first - cx
-                            val py = dots[idx].second - cy
-                            val step = sqrt((px * px + py * py).toDouble())
-                            if (step < 1e-6) continue
-                            val dirLen = kotlin.math.hypot(dirX.toDouble(), dirY.toDouble())
-                            val dot = if (dirLen == 0.0) 0.0 else
-                                (dirX * px + dirY * py) / (step * dirLen)
-                            val score = step - 0.5 * dot
-                            if (score < bestScore) { bestScore = score; bestIdx = idx }
-                        }
-                    }
-                }
-                // Hard geometric cap on any step (mask px): the walk may never
-                // jump a border gap regardless of cell arithmetic.
-                if (bestIdx >= 0) {
-                    val bx = dots[bestIdx].first - cx
-                    val by = dots[bestIdx].second - cy
-                    if (sqrt(bx * bx + by * by) > MAX_STEP_PX) bestIdx = -1
-                }
-                if (bestIdx < 0) break   // no adjacent dot free: end this chain
-                dirX = dots[bestIdx].first - cx
-                dirY = dots[bestIdx].second - cy
-                used[bestIdx] = true
-                chain.add(dots[bestIdx])
-                cur = bestIdx
-            }
-            return if (chain.size >= 8) chain else null
+    /**
+     * Douglas-Peucker for a CLOSED polygon: rotates the ring to start at the
+     * point farthest from the centroid (so both halves are non-degenerate even
+     * for convex shapes), splits it in half, simplifies each half, then drops
+     * only the ONE vertex duplicated at the split (A's last == B's first).
+     * The ring's wrap endpoint (B's last) is a real vertex and is kept.
+     */
+    private fun simplifyClosed(
+        ptsIn: List<Pair<Float, Float>>, eps: Float,
+    ): List<Pair<Float, Float>> {
+        var pts = ptsIn
+        if (pts.size > 1 && pts.first() == pts.last()) pts = pts.dropLast(1)
+        if (pts.size < 4) return pts
+        // Split at the point farthest from the centroid (keeps both halves
+        // non-degenerate even for convex shapes).
+        var cxs = 0f
+        var cys = 0f
+        for (p in pts) { cxs += p.first; cys += p.second }
+        cxs /= pts.size
+        cys /= pts.size
+        var farIdx = 0
+        var farD = -1f
+        for (i in pts.indices) {
+            val dx = pts[i].first - cxs
+            val dy = pts[i].second - cys
+            val d = dx * dx + dy * dy
+            if (d > farD) { farD = d; farIdx = i }
         }
+        val rot = pts.subList(farIdx, pts.size) + pts.subList(0, farIdx)
+        val half = rot.size / 2
+        val a = simplifyOpen(rot.subList(0, half + 1), eps)
+        val b = simplifyOpen(rot.subList(half, rot.size), eps)
+        // Join: drop the single duplicated split vertex (a.last == b.first).
+        val out = ArrayList<Pair<Float, Float>>(a.size + b.size)
+        out.addAll(a.subList(0, a.size - 1))
+        out.addAll(b)
+        return out
+    }
 
-        // Start chains from the topmost unused dot (deterministic).
-        while (true) {
-            var start = -1
-            for (i in dots.indices) {
-                if (!used[i] &&
-                    (start < 0 || dots[i].second < dots[start].second ||
-                        (dots[i].second == dots[start].second && dots[i].first < dots[start].first))
-                ) start = i
-            }
-            if (start < 0) break
-            tryChain(start)?.let { chains.add(it) }
+    /** Resamples a closed polygon to exactly [count] points by arc length. */
+    private fun resampleClosed(
+        pts: List<Pair<Float, Float>>, count: Int,
+    ): List<Pair<Float, Float>> {
+        val n = pts.size
+        if (n < 3) return pts
+        val seg = FloatArray(n)
+        var total = 0f
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            val dx = pts[j].first - pts[i].first
+            val dy = pts[j].second - pts[i].second
+            seg[i] = sqrt(dx * dx + dy * dy)
+            total += seg[i]
         }
-
-        // Stage 3F: canonical winding - reverse chains whose signed area is
-        // negative so every closed chain walks the same direction no matter
-        // which way the greedy walk happened to go. Without this, a direction
-        // flip between frames keeps the chain LENGTH intact (EMA engages) but
-        // blends dot i with its spatially opposite counterpart.
-        for (i in chains.indices) {
-            val c = chains[i]
-            var area2 = 0.0
-            for (j in c.indices) {
-                val a = c[j]
-                val b = c[(j + 1) % c.size]
-                area2 += a.first.toDouble() * b.second - b.first.toDouble() * a.second
+        if (total <= 0f) return pts
+        val out = ArrayList<Pair<Float, Float>>(count)
+        val step = total / count
+        var segIdx = 0
+        var segPos = 0f
+        for (k in 0 until count) {
+            val target = k * step
+            while (segIdx < n - 1 && segPos + seg[segIdx] < target) {
+                segPos += seg[segIdx]
+                segIdx++
             }
-            if (area2 < 0) chains[i] = c.reversed()
+            val t = if (seg[segIdx] <= 0f) 0f else (target - segPos) / seg[segIdx]
+            val a = pts[segIdx]
+            val b = pts[(segIdx + 1) % n]
+            out.add(a.first + (b.first - a.first) * t to a.second + (b.second - a.second) * t)
         }
-        return chains.sortedByDescending { it.size }
+        return out
     }
 
     // ── temporal smoothing ────────────────────────────────────────────────────
 
     /**
-     * EMA-blends the chained dots with the previous frame's track. The chain
-     * always starts at the topmost dot (deterministic), so correspondence is
-     * stable frame to frame; a size change falls back to the raw chain.
+     * EMA-blends the contour points with the previous frame's track. Both
+     * contours are canonicalized (same winding, same start point) and have the
+     * same fixed point count, so index 0 maps to the exact same boundary point
+     * in both frames and index i is within the small arc-length drift from
+     * perimeter change. A size change falls back to the raw contour.
      */
     private fun emaSoft(
         prev: Track, rawIn: List<Pair<Float, Float>>,
@@ -577,54 +727,38 @@ class OverlayView @JvmOverloads constructor(
             if (mask != null) {
                 val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
 
-                // One outline per chain - multi-blob masks stay fully outlined
-                // (reviewer #2: longest-chain-only dropped blobs).
-                val paths = if (showSmoothOutline && item.chains.isNotEmpty()) {
+                // Every contour is closed by construction, so each is a valid
+                // clip region. One tinted-mesh draw per contour: successive
+                // clipPath calls INTERSECT (not union), so disjoint blobs must
+                // be clipped+drawn one at a time or the region collapses.
+                val paths = if (showSmoothOutline) {
                     item.chains.mapNotNull { chain ->
-                        if (chain.size >= 3) buildSmoothPath(chain, maskRect, mask) else null
+                        if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
                     }
                 } else emptyList()
-                // Parallel closure flags (same order as paths): only CLOSED
-                // chains may be used as clip regions (New Bug 3).
-                val closedFlags = item.chains.map { chain ->
-                    if (chain.size < 3) false else isClosedChain(chain, maskRect, mask)
-                }
 
-                // Stage 3E: stroke FIRST, then the tinted mask (clipped to
-                // closed+sane paths) ON TOP. The mask now covers the stroke's
-                // inner half and flushes against its outer half - the ~2.5px
-                // untinted band outside the line is gone; the line reads as
-                // sitting exactly ON the boundary.
-                linePaint.color = DetectionStyle.vibrantFor(classColor)
-                linePaint.alpha = 255
-                for (p in paths) canvas.drawPath(p, linePaint)
-
-                // Mask on top: successive clipPath calls INTERSECT (not
-                // union), so clip+draw PER PATH - stacking clips for disjoint
-                // blobs would reduce the region to ~empty (reviewer 2, NB1).
-                // Only genuinely-closed paths may clip: an open path's clip
-                // FILL uses the implicit closing chord (reviewer 2, NB3).
-                val sane = paths.filterIndexed { idx, p ->
-                    closedFlags.getOrNull(idx) == true && isSaneClipPath(p, maskRect)
-                }
-                if (sane.isEmpty()) {
-                    if (paths.isEmpty()) {
-                        // Outline off or no paths: plain full mask.
+                if (paths.isEmpty()) {
+                    // Outline off (or no contour): plain full mask.
+                    drawTintedMask(canvas, mask, maskRect, classColor)
+                } else {
+                    val sane = paths.filter { isSaneClipPath(it, maskRect) }
+                    if (sane.isEmpty()) {
                         drawTintedMask(canvas, mask, maskRect, classColor)
                     } else {
-                        // Paths exist but none sane/closed: draw the mask
-                        // unclipped so the mesh is never erased - and keep a
-                        // visible line by re-stroking on top (muted inner half
-                        // would otherwise read as a faded line).
-                        for (p in paths) canvas.drawPath(p, linePaint)
+                        for (p in sane) {
+                            val save = canvas.save()
+                            canvas.clipPath(p)
+                            drawTintedMask(canvas, mask, maskRect, classColor)
+                            canvas.restoreToCount(save)
+                        }
                     }
-                } else {
-                    for (p in sane) {
-                        val save = canvas.save()
-                        canvas.clipPath(p)
-                        drawTintedMask(canvas, mask, maskRect, classColor)
-                        canvas.restoreToCount(save)
-                    }
+                    // Stroke ON TOP of the tint: the opaque line stays at full
+                    // strength (drawn first and then tinted over, it read as a
+                    // washed-out half-width line) and sits centred on the
+                    // boundary - half on the mesh, half outside it.
+                    linePaint.color = DetectionStyle.vibrantFor(classColor)
+                    linePaint.alpha = 255
+                    for (p in paths) canvas.drawPath(p, linePaint)
                 }
             }
 
@@ -644,32 +778,19 @@ class OverlayView @JvmOverloads constructor(
         }
     }
 
-    /** True when the first dots of two chains are within FIRST_DOT_GATE. */
-    private fun firstDotClose(
+    /** Distance (normalized) between the first contour points of two contours. */
+    private fun firstDotDist(
         prev: Array<Pair<Float, Float>>, cur: List<Pair<Float, Float>>,
-    ): Boolean {
+    ): Float {
         val dx = prev[0].first - cur[0].first
         val dy = prev[0].second - cur[0].second
-        return sqrt(dx * dx + dy * dy) <= FIRST_DOT_GATE
+        return sqrt(dx * dx + dy * dy)
     }
 
-    /**
-     * True when a dot chain loops (first/last within ~2 grid steps). The gap
-     * is compared in MASK pixels - the old 8-screen-px threshold sat BELOW
-     * the real inter-dot screen distance (~2 mask px = 13+ screen px), so
-     * every genuine loop was misclassified open (final reviewer fix).
-     */
-    private fun isClosedChain(
-        chain: List<Pair<Float, Float>>, maskRect: RectF, mask: Bitmap,
-    ): Boolean {
-        val gapX = (chain[0].first - chain[chain.size - 1].first) * maskRect.width()
-        val gapY = (chain[0].second - chain[chain.size - 1].second) * maskRect.height()
-        val sx = maskRect.width() / mask.width.toFloat()
-        val sy = maskRect.height() / mask.height.toFloat()
-        val gx = gapX / sx
-        val gy = gapY / sy
-        return (gx * gx + gy * gy) < CLOSE_GAP2_MASK
-    }
+    /** True when the first points of two contours are within FIRST_DOT_GATE. */
+    private fun firstDotClose(
+        prev: Array<Pair<Float, Float>>, cur: List<Pair<Float, Float>>,
+    ): Boolean = firstDotDist(prev, cur) <= FIRST_DOT_GATE
 
     private val filterCache = HashMap<Int, android.graphics.ColorFilter>()
 
@@ -703,12 +824,13 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Builds the smooth closed path THROUGH the chained dots: on-curve
-     * midpoints + dot control points (quadratic bezier) - each dot is
-     * represented exactly, corners stay sharp where the dots say so.
+     * Builds the smooth CLOSED path through the resampled contour: on-curve
+     * midpoints with the contour points as quadratic control points, so each
+     * contour point is represented exactly while the line between them is
+     * smooth. Contours are closed by construction, so the path always closes.
      */
     private fun buildSmoothPath(
-        dots: List<Pair<Float, Float>>, maskRect: RectF, mask: Bitmap,
+        dots: List<Pair<Float, Float>>, maskRect: RectF,
     ): Path {
         val n = dots.size
         if (n < 3) return Path()
@@ -719,21 +841,8 @@ class OverlayView @JvmOverloads constructor(
             pts[i * 2 + 1] = maskRect.top + dots[i].second * maskRect.height()
         }
 
-        // Closure test: last dot within ~2 grid steps of the first - closing
-        // an OPEN chain would draw a straight cut across the mesh (reviewer
-        // #3). Compared in MASK px (see isClosedChain - screen-px threshold
-        // was below real inter-dot distance, misclassifying every loop).
-        val gapX = (dots[0].first - dots[n - 1].first) * maskRect.width()
-        val gapY = (dots[0].second - dots[n - 1].second) * maskRect.height()
-        val sxScale = maskRect.width() / mask.width.toFloat()
-        val syScale = maskRect.height() / mask.height.toFloat()
-        val mgx = gapX / sxScale
-        val mgy = gapY / syScale
-        val closes = (mgx * mgx + mgy * mgy) < CLOSE_GAP2_MASK
-
         val mids = FloatArray(n * 2)
-        val segs = if (closes) n else n - 1
-        for (i in 0 until segs) {
+        for (i in 0 until n) {
             val j = (i + 1) % n
             mids[i * 2] = (pts[i * 2] + pts[j * 2]) / 2f
             mids[i * 2 + 1] = (pts[i * 2 + 1] + pts[j * 2 + 1]) / 2f
@@ -741,16 +850,15 @@ class OverlayView @JvmOverloads constructor(
 
         val path = Path()
         path.moveTo(mids[0], mids[1])
-        for (i in 0 until segs) {
-            // Control = the SHARED dot between the two midpoints (pts[i+1]
-            // ends at mids[i], which spans dots i..i+1) - reviewer 3's
-            // off-by-one: the bulge must hug the dot between its anchors.
+        for (i in 0 until n) {
+            // Control = the contour point between the two midpoint anchors, so
+            // the curve bulges out to hug the real boundary point.
             path.quadTo(
                 pts[((i + 1) % n) * 2], pts[((i + 1) % n) * 2 + 1],
                 mids[i * 2], mids[i * 2 + 1],
             )
         }
-        if (closes) path.close()
+        path.close()
         return path
     }
 
