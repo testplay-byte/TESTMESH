@@ -152,7 +152,6 @@ class OverlayView @JvmOverloads constructor(
         sourceImageHeight = inputHeight
 
         frameCounter++
-        val now = System.currentTimeMillis()
 
         // Match current detections to previous-frame instances by IoU.
         val matched = BooleanArray(instances.size)
@@ -180,6 +179,10 @@ class OverlayView @JvmOverloads constructor(
             val mask = det.maskBitmap
             var chains: List<List<Pair<Float, Float>>> = emptyList()
             var anchor: Float? = null
+
+            // Any matched detection keeps its instance alive, even when mask
+            // decode failed this frame (prevents EMA state reset flicker).
+            assignments[det]?.let { it.lastFrame = frameCounter }
 
             if (mask != null) {
                 val raw = extractBorderDots(mask)
@@ -468,16 +471,32 @@ class OverlayView @JvmOverloads constructor(
                         if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
                     }
                 } else emptyList()
-
-                // 1. Mesh inside the line: clip to the union of all chain
-                //    paths (sanity-checked). With no qualifying path, draw the
-                //    mask unclipped - the mesh must never be erased.
-                val save = canvas.save()
-                for (p in paths) {
-                    if (isSaneClipPath(p, maskRect)) canvas.clipPath(p)
+                // Parallel closure flags (same order as paths): only CLOSED
+                // chains may be used as clip regions (New Bug 3).
+                val closedFlags = item.chains.map { chain ->
+                    if (chain.size < 3) false else isClosedChain(chain, maskRect)
                 }
-                drawTintedMask(canvas, mask, maskRect, classColor)
-                canvas.restoreToCount(save)
+
+                // 1. Mesh inside the line: successive clipPath calls
+                //    INTERSECT (not union), so clip+draw PER PATH - stacking
+                //    clips for disjoint blobs would reduce the region to
+                //    ~empty and erase the mesh (reviewer 2, New Bug 1).
+                //    Only genuinely-closed paths may clip: an open path's
+                //    clip FILL uses the implicit closing chord, which would
+                //    erase mesh outside the chord (New Bug 3).
+                val sane = paths.filterIndexed { idx, p ->
+                    closedFlags.getOrNull(idx) == true && isSaneClipPath(p, maskRect)
+                }
+                if (sane.isEmpty()) {
+                    drawTintedMask(canvas, mask, maskRect, classColor)
+                } else {
+                    for (p in sane) {
+                        val save = canvas.save()
+                        canvas.clipPath(p)
+                        drawTintedMask(canvas, mask, maskRect, classColor)
+                        canvas.restoreToCount(save)
+                    }
+                }
 
                 // 2. Stroke every chain's boundary.
                 if (paths.isNotEmpty()) {
@@ -501,6 +520,15 @@ class OverlayView @JvmOverloads constructor(
                 drawLabel(canvas, screenRect, det, classColor, anchorTop = anchorTop)
             }
         }
+    }
+
+    /** True when a dot chain loops (first/last within ~2 grid steps). */
+    private fun isClosedChain(
+        chain: List<Pair<Float, Float>>, maskRect: RectF,
+    ): Boolean {
+        val gapX = (chain[0].first - chain[chain.size - 1].first) * maskRect.width()
+        val gapY = (chain[0].second - chain[chain.size - 1].second) * maskRect.height()
+        return (gapX * gapX + gapY * gapY) < 64f
     }
 
     private val filterCache = HashMap<Int, android.graphics.ColorFilter>()
