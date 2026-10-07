@@ -19,24 +19,22 @@ import kotlin.math.sqrt
 /**
  * Full-screen canvas that maps normalized detections onto screen space.
  *
- * ARCHITECTURE NOTE (v8 - smooth line, centered on the boundary): the outline
- * is a **quadratic-bezier curve fitted to the mask contour**, stroked ON the
- * boundary - half the stroke lies on the mesh, half outside it. The mesh is
- * CLIPPED to the path so no mesh pixel shows outside the line. This is the
- * old smooth look, with its two former bugs fixed:
- *  - v3 bug A (garbage/off-screen path): contour points are NORMALIZED to
- *    0..1 mask space before screen mapping.
- *  - round-7 bug B (scribble): the contour is ROTATED to start nearest the
- *    previous frame's first point before temporal blending.
- * The v5/v7 ring approach (bitmap dilation) was pixelated because it shares
- * the mask's own resolution - a fitted curve is resolution-independent.
+ * ARCHITECTURE NOTE (v9 - border dots): the outline is built from BORDER
+ * DOTS - every solid mask pixel that touches a background pixel is a dot -
+ * which are then chained nearest-to-nearest and connected. This is the user's
+ * explicit model ("dots around the borders which connect with the nearest
+ * dot around them") and it fixes both v8 complaints:
  *
- * NO temporal bitmap blending: the "shadow" was exactly that - last frame's
- * ring unioned into the current one. Temporal smoothing now applies only to
- * the fitted POINTS (EMA), which moves with the mesh and never trails.
+ *  1. POINTY TIPS: v8 compressed the whole contour to 48 arc-length points,
+ *     which averaged sharp corners away. Dots sit on the ACTUAL border
+ *     pixels, so every point is represented exactly.
+ *  2. MISSING BORDER: the Moore-neighborhood tracer could fail (holes,
+ *     odd shapes) leaving mesh with no border. Dot extraction is a per-pixel
+ *     classification - if the mesh exists, its dots exist. Failure-proof.
  *
- * All analysis (tracing, resampling, EMA) happens once per frame in
- * [setResults]; [onDraw] only draws cached geometry.
+ * The chained dots are then smoothed (EMA per dot index + midpoint-bezier
+ * through the chained sequence) so the line keeps the smooth stroke look.
+ * All analysis runs once per frame in [setResults]; [onDraw] only draws.
  *
  * Rendering per detection:
  *  1. Smooth outline ON: tinted mesh clipped to the line + vibrant stroke.
@@ -63,11 +61,15 @@ class OverlayView @JvmOverloads constructor(
         private const val LABEL_CORNER_R = 14f
         private const val MASK_ALPHA = 110
 
-        // ── outline line ─────────────────────────────────────────────────
-        private const val LINE_STROKE_W = 5f     // screen px (old look)
-        private const val RESAMPLE_POINTS = 48   // points around the silhouette
+        // ── border dots ──────────────────────────────────────────────────
+        // Grid step: dots are sampled every N mask pixels on the border, and
+        // each connects to its nearest neighbors. 2 on a ~128px mask gives a
+        // dense but cheap dot set (~hundreds), preserving sharp points.
+        private const val DOT_GRID_STEP = 2
 
-        // ── temporal smoothing (point EMA + label anchor) ────────────────
+        private const val LINE_STROKE_W = 5f     // screen px (old look)
+
+        // ── temporal smoothing (dot EMA + label anchor) ──────────────────
         private const val SMOOTHING = 0.45f
         private const val MAX_TRACK_DISTANCE = 0.35f // normalized; beyond = re-acquire
     }
@@ -75,8 +77,8 @@ class OverlayView @JvmOverloads constructor(
     /** A detection with its per-frame geometry precomputed in [setResults]. */
     private class PreparedItem(
         val det: Detection,
-        /** Smoothed contour, normalized 0..1 in mask space (null = none). */
-        val contour: List<Pair<Float, Float>>?,
+        /** Smoothed chained dots, normalized 0..1 in mask space (null = none). */
+        val dots: List<Pair<Float, Float>>?,
         /** Smoothed top edge of the silhouette, normalized 0..1 (null = none). */
         val labelAnchorNorm: Float?,
     )
@@ -135,29 +137,28 @@ class OverlayView @JvmOverloads constructor(
         val items = ArrayList<PreparedItem>(results.size)
         for (det in results) {
             val mask = det.maskBitmap
-            var contour: List<Pair<Float, Float>>? = null
+            var dots: List<Pair<Float, Float>>? = null
             var anchor: Float? = null
 
             if (mask != null) {
                 val firstOfClass = seenClasses.add(det.classId)
-                val raw = traceContour(mask)
-                if (!raw.isNullOrEmpty()) {
-                    val resampled = resampleClosed(raw, RESAMPLE_POINTS)
-                    // Bug A fix: normalize to 0..1 mask space BEFORE any
-                    // screen mapping (v3 used raw mask pixels -> off-screen).
-                    val norm = resampled.map { p ->
+                val raw = extractBorderDots(mask)
+                if (raw != null && raw.size >= 8) {
+                    val chained = chainNearest(raw)
+                    // Normalize to 0..1 mask space BEFORE any screen mapping.
+                    val norm = chained.map { p ->
                         (p.first / mask.width) to (p.second / mask.height)
                     }
                     if (firstOfClass) {
-                        contour = emaContour(det.classId, norm)
-                        anchor = emaAnchor(det.classId, contour)
+                        dots = emaDots(det.classId, norm)
+                        anchor = emaAnchor(det.classId, dots)
                     } else {
-                        contour = norm
+                        dots = norm
                         anchor = norm.minOfOrNull { it.second }
                     }
                 }
             }
-            items.add(PreparedItem(det, contour, anchor))
+            items.add(PreparedItem(det, dots, anchor))
         }
         prepared = items
         invalidate()
@@ -175,16 +176,93 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
-    // ── temporal point smoothing ──────────────────────────────────────────────
+    // ── border-dot extraction ─────────────────────────────────────────────────
 
     /**
-     * EMA-blends the raw (normalized) contour with the previous track.
-     * Bug B fix: the tracer may start at any pixel; if the start pixel jumps
-     * between frames the point correspondence twists and the line scribbles.
-     * The raw list is ROTATED to start nearest the previous frame's point 0
-     * before blending.
+     * Collects border dots: solid mask pixels (on a [DOT_GRID_STEP] grid)
+     * with at least one non-solid 4-neighbor. Per-pixel classification -
+     * cannot "fail to trace" like a walking tracer; if the mesh exists its
+     * dots exist. Returns null only when the mask is empty.
      */
-    private fun emaContour(
+    private fun extractBorderDots(mask: Bitmap): List<Pair<Int, Int>>? {
+        val w = mask.width
+        val h = mask.height
+        if (w < 4 || h < 4) return null
+
+        val px = IntArray(w * h)
+        mask.getPixels(px, 0, w, 0, 0, w, h)
+        fun solid(x: Int, y: Int): Boolean =
+            x in 0 until w && y in 0 until h && (px[y * w + x] ushr 24) > 128
+
+        val dots = ArrayList<Pair<Int, Int>>(512)
+        var sy = DOT_GRID_STEP / 2
+        while (sy < h) {
+            var sx = DOT_GRID_STEP / 2
+            while (sx < w) {
+                if (solid(sx, sy) &&
+                    (!solid(sx - 1, sy) || !solid(sx + 1, sy) ||
+                        !solid(sx, sy - 1) || !solid(sx, sy + 1))
+                ) {
+                    dots.add(sx to sy)
+                }
+                sx += DOT_GRID_STEP
+            }
+            sy += DOT_GRID_STEP
+        }
+        return if (dots.isEmpty()) null else dots
+    }
+
+    /**
+     * Orders the unordered dot set into a boundary walk: each dot connects to
+     * its nearest not-yet-used dot ("dots connect with the nearest dot around
+     * them"). Greedy nearest-neighbor on a planar closed outline follows the
+     * boundary in order; the result is closed by connecting back to the start.
+     */
+    private fun chainNearest(dots: List<Pair<Int, Int>>): List<Pair<Int, Int>> {
+        if (dots.size < 3) return dots
+
+        val n = dots.size
+        val used = BooleanArray(n)
+        val order = ArrayList<Pair<Int, Int>>(n)
+
+        // Start at the topmost dot (deterministic, near the label anchor).
+        var cur = 0
+        for (i in 1 until n) {
+            if (dots[i].second < dots[cur].second ||
+                (dots[i].second == dots[cur].second && dots[i].first < dots[cur].first)
+            ) cur = i
+        }
+        used[cur] = true
+        order.add(dots[cur])
+
+        for (step in 1 until n) {
+            val cx = dots[cur].first
+            val cy = dots[cur].second
+            var best = -1
+            var bestD = Int.MAX_VALUE
+            for (i in 0 until n) {
+                if (used[i]) continue
+                val dx = dots[i].first - cx
+                val dy = dots[i].second - cy
+                val d = dx * dx + dy * dy
+                if (d < bestD) { bestD = d; best = i }
+            }
+            if (best < 0) break
+            used[best] = true
+            order.add(dots[best])
+            cur = best
+        }
+        return order
+    }
+
+    // ── temporal smoothing ────────────────────────────────────────────────────
+
+    /**
+     * EMA-blends the chained dots with the previous frame's track. The chain
+     * always starts at the topmost dot (deterministic), so correspondence is
+     * stable frame to frame; a size change falls back to the raw chain.
+     */
+    private fun emaDots(
         classId: Int, rawIn: List<Pair<Float, Float>>,
     ): List<Pair<Float, Float>> {
         val prev = tracks[classId]
@@ -193,26 +271,12 @@ class OverlayView @JvmOverloads constructor(
             return rawIn
         }
 
-        // Rotate raw so index 0 is closest to the previous frame's point 0.
-        val n = rawIn.size
-        var bestIdx = 0
-        var bestD = Float.MAX_VALUE
-        val p0 = prev.points[0]
-        for (i in 0 until n) {
-            val dx = rawIn[i].first - p0.first
-            val dy = rawIn[i].second - p0.second
-            val d = dx * dx + dy * dy
-            if (d < bestD) { bestD = d; bestIdx = i }
-        }
-        val raw = ArrayList<Pair<Float, Float>>(n)
-        for (i in 0 until n) raw.add(rawIn[(bestIdx + i) % n])
-
-        val out = ArrayList<Pair<Float, Float>>(n)
-        for (i in 0 until n) {
+        val out = ArrayList<Pair<Float, Float>>(rawIn.size)
+        for (i in rawIn.indices) {
             val px = prev.points[i].first
             val py = prev.points[i].second
-            val nx = raw[i].first
-            val ny = raw[i].second
+            val nx = rawIn[i].first
+            val ny = rawIn[i].second
             val dist = sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
             out.add(
                 if (dist > MAX_TRACK_DISTANCE) nx to ny   // jump = re-acquire
@@ -225,8 +289,8 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /** EMA-blends the label anchor (top edge Y, normalized) across frames. */
-    private fun emaAnchor(classId: Int, contour: List<Pair<Float, Float>>?): Float? {
-        val raw = contour?.minOfOrNull { it.second } ?: return null
+    private fun emaAnchor(classId: Int, dots: List<Pair<Float, Float>>?): Float? {
+        val raw = dots?.minOfOrNull { it.second } ?: return null
         val prev = tracks[classId]?.labelAnchor
         val smoothed = if (prev == null || abs(raw - prev) > MAX_TRACK_DISTANCE) {
             raw
@@ -235,104 +299,6 @@ class OverlayView @JvmOverloads constructor(
         }
         tracks[classId]?.labelAnchor = smoothed
         return smoothed
-    }
-
-    // ── contour extraction ────────────────────────────────────────────────────
-
-    /**
-     * Moore-neighborhood border tracing on the mask alpha, lightly
-     * simplified. Returns null when the mask is empty or degenerate.
-     */
-    private fun traceContour(mask: Bitmap): List<Pair<Int, Int>>? {
-        val w = mask.width
-        val h = mask.height
-        if (w < 4 || h < 4) return null
-
-        val pixels = IntArray(w * h)
-        mask.getPixels(pixels, 0, w, 0, 0, w, h)
-        fun solid(x: Int, y: Int): Boolean =
-            x in 0 until w && y in 0 until h && (pixels[y * w + x] ushr 24) > 128
-
-        var sx = -1; var sy = -1
-        outer@ for (y in 0 until h) {
-            for (x in 0 until w) {
-                if (solid(x, y)) { sx = x; sy = y; break@outer }
-            }
-        }
-        if (sx < 0) return null
-
-        val dirs = arrayOf(
-            1 to 0, 1 to 1, 0 to 1, -1 to 1, -1 to 0, -1 to -1, 0 to -1, 1 to -1
-        )
-        val contour = ArrayList<Pair<Int, Int>>(256)
-        var cx = sx; var cy = sy
-        var dir = 0
-        var steps = 0
-        val maxSteps = w * h
-        do {
-            contour.add(cx to cy)
-            var found = false
-            for (i in 0 until 8) {
-                val nd = (dir + 6 + i) % 8
-                val nx = cx + dirs[nd].first
-                val ny = cy + dirs[nd].second
-                if (solid(nx, ny)) {
-                    cx = nx; cy = ny; dir = nd; found = true
-                    break
-                }
-            }
-            if (!found) break
-            steps++
-        } while ((cx != sx || cy != sy) && steps < maxSteps)
-
-        if (contour.size < 8) return null
-        return contour
-    }
-
-    /**
-     * Resamples a closed contour to exactly [n] evenly-spaced points by arc
-     * length, stabilizing point correspondence between frames (required for
-     * meaningful EMA blending).
-     */
-    private fun resampleClosed(
-        contour: List<Pair<Int, Int>>, n: Int,
-    ): List<Pair<Float, Float>> {
-        if (contour.size < 3) return contour.map { it.first.toFloat() to it.second.toFloat() }
-
-        var total = 0f
-        val dist = FloatArray(contour.size)
-        for (i in contour.indices) {
-            val a = contour[i]
-            val b = contour[(i + 1) % contour.size]
-            val d = sqrt(
-                (b.first - a.first).toFloat() * (b.first - a.first) +
-                    (b.second - a.second).toFloat() * (b.second - a.second)
-            )
-            dist[i] = d
-            total += d
-        }
-        if (total <= 0f) return contour.map { it.first.toFloat() to it.second.toFloat() }
-
-        val step = total / n
-        val out = ArrayList<Pair<Float, Float>>(n)
-        var i = 0
-        var traveled = 0f
-        for (k in 0 until n) {
-            val target = k * step
-            while (i < contour.size - 1 && traveled + dist[i] < target) {
-                traveled += dist[i]
-                i++
-            }
-            val a = contour[i]
-            val b = contour[(i + 1) % contour.size]
-            val seg = dist[i].coerceAtLeast(1e-6f)
-            val t = ((target - traveled) / seg).coerceIn(0f, 1f)
-            out.add(
-                a.first + (b.first - a.first) * t to
-                    a.second + (b.second - a.second) * t
-            )
-        }
-        return out
     }
 
     // ── drawing (cached geometry only) ────────────────────────────────────────
@@ -363,13 +329,13 @@ class OverlayView @JvmOverloads constructor(
             val mask = det.maskBitmap
             if (mask != null) {
                 val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
-                val path = if (showSmoothOutline && item.contour != null) {
-                    buildSmoothPath(item.contour, maskRect)
+                val path = if (showSmoothOutline && item.dots != null) {
+                    buildSmoothPath(item.dots, maskRect)
                 } else null
 
                 if (path != null) {
                     // 1. Mesh strictly inside the line: tinted mask clipped to
-                    //    the fitted boundary curve.
+                    //    the dot-chained boundary curve.
                     val save = canvas.save()
                     canvas.clipPath(path)
                     drawTintedMask(canvas, mask, maskRect, classColor)
@@ -417,19 +383,23 @@ class OverlayView @JvmOverloads constructor(
         canvas.drawBitmap(mask, null, maskRect, maskPaint)
     }
 
-    /** Builds the closed quadratic-bezier path from normalized contour points. */
+    /**
+     * Builds the smooth closed path THROUGH the chained dots: on-curve
+     * midpoints + dot control points (quadratic bezier) - each dot is
+     * represented exactly, corners stay sharp where the dots say so.
+     */
     private fun buildSmoothPath(
-        contour: List<Pair<Float, Float>>, maskRect: RectF,
+        dots: List<Pair<Float, Float>>, maskRect: RectF,
     ): Path {
-        val n = contour.size
+        val n = dots.size
+        if (n < 3) return Path()
+
         val pts = FloatArray(n * 2)
         for (i in 0 until n) {
-            pts[i * 2] = maskRect.left + contour[i].first * maskRect.width()
-            pts[i * 2 + 1] = maskRect.top + contour[i].second * maskRect.height()
+            pts[i * 2] = maskRect.left + dots[i].first * maskRect.width()
+            pts[i * 2 + 1] = maskRect.top + dots[i].second * maskRect.height()
         }
 
-        // Midpoints between consecutive points become on-curve anchors; the
-        // original contour points become control points - smooth-curve trick.
         val mids = FloatArray(n * 2)
         for (i in 0 until n) {
             val j = (i + 1) % n
@@ -442,7 +412,7 @@ class OverlayView @JvmOverloads constructor(
         for (i in 0 until n) {
             val j = (i + 1) % n
             path.quadTo(
-                pts[j * 2], pts[j * 2 + 1],      // control = real contour point
+                pts[j * 2], pts[j * 2 + 1],      // control = real border dot
                 mids[j * 2], mids[j * 2 + 1],    // anchor   = midpoint
             )
         }
