@@ -77,6 +77,11 @@ class OverlayView @JvmOverloads constructor(
         // (frame-count grace - wall-clock timeouts broke smoothing on slow
         // frames).
         private const val GRACE_FRAMES = 3L
+
+        // Stage 2C: chains beyond the primary that get EMA tracks, and the
+        // first-dot proximity gate (normalized) guarding every correspondence.
+        private const val MAX_SECONDARY_EMA = 2   // primary + 2 secondary = top 3
+        private const val FIRST_DOT_GATE = 0.03f
     }
 
     /** A detection with its per-frame geometry precomputed in [setResults]. */
@@ -139,8 +144,11 @@ class OverlayView @JvmOverloads constructor(
     private class InstanceTrack(
         var box: android.graphics.RectF,   // previous frame's bbox (updated on match)
         val classId: Int,
-        var track: Track?,
+        var track: Track?,                 // longest chain's track (primary)
         var lastFrame: Long,               // setResults() counter at last match
+        // Stage 2C: secondary blob tracks, same order as the sorted chain
+        // list (descending size). Null = no stable correspondence yet.
+        var secondary: MutableList<Track?> = mutableListOf(),
     )
 
     private val instances = ArrayList<InstanceTrack>()
@@ -195,27 +203,56 @@ class OverlayView @JvmOverloads constructor(
                         }
                     }
                     if (normChains.isNotEmpty()) {
-                        // EMA the longest chain against this instance's
-                        // previous points; shorter blobs render raw.
-                        val longest = normChains.maxByOrNull { it.size }!!
+                        // Stage 2C: the longest chain EMA's against the
+                        // instance's primary track; the next MAX_SECONDARY_EMA
+                        // chains EMA against per-index secondary tracks. All
+                        // correspondences are guarded: same length + first dot
+                        // within FIRST_DOT_GATE (normalized) - otherwise that
+                        // chain renders raw this frame.
                         val inst = assignments[det]
-                        val smoothed = if (inst?.track != null) {
-                            emaDots(inst, longest) ?: longest
-                        } else longest
-                        anchor = if (inst != null) emaAnchor(inst, smoothed)
-                                 else smoothed.minOfOrNull { it.second }
-                        // Rebuild the chain list with the smoothed longest.
                         val outChains = ArrayList<List<Pair<Float, Float>>>(normChains.size)
-                        for (c in normChains) {
-                            outChains.add(if (c === longest) smoothed else c)
+                        val secTracks = ArrayList<Track?>(normChains.size)
+                        var anchor: Float? = null
+
+                        normChains.forEachIndexed { ci, chain ->
+                            val isPrimary = ci == 0   // chains arrive sorted desc by size
+                            val prevTrack = when {
+                                inst == null -> null
+                                isPrimary -> inst.track
+                                else -> inst.secondary.getOrNull(ci - 1)
+                            }
+                            val correspondable =
+                                prevTrack != null && prevTrack.points.size == chain.size &&
+                                firstDotClose(prevTrack.points, chain)
+                            val smoothed = if (correspondable) {
+                                emaSoft(prevTrack!!, chain)
+                            } else chain
+                            if (isPrimary) {
+                                anchor = if (inst != null && correspondable) {
+                                    emaAnchor(inst, smoothed)
+                                } else smoothed.minOfOrNull { it.second }
+                            }
+                            outChains.add(smoothed)
+                            if (ci <= MAX_SECONDARY_EMA) {
+                                secTracks.add(Track(smoothed.toTypedArray(), null))
+                            }
                         }
                         chains = outChains
+
                         if (inst != null) {
                             inst.box = det.boundingBox
                             inst.lastFrame = frameCounter
-                            inst.track = Track(smoothed.toTypedArray(), anchor)
+                            inst.track = secTracks.firstOrNull()
+                            // Resync the secondary list by index.
+                            inst.secondary.clear()
+                            for (k in 1 until secTracks.size) inst.secondary.add(secTracks[k])
                         } else {
-                            instances.add(InstanceTrack(det.boundingBox, det.classId, Track(smoothed.toTypedArray(), anchor), frameCounter))
+                            val primary = secTracks.firstOrNull()
+                            val newInst = InstanceTrack(
+                                det.boundingBox, det.classId, primary, frameCounter,
+                            )
+                            for (k in 1 until secTracks.size) newInst.secondary.add(secTracks[k])
+                            instances.add(newInst)
                         }
                     }
                 } else if (assignments[det] != null) {
@@ -433,12 +470,11 @@ class OverlayView @JvmOverloads constructor(
      * always starts at the topmost dot (deterministic), so correspondence is
      * stable frame to frame; a size change falls back to the raw chain.
      */
-    private fun emaDots(
-        inst: InstanceTrack, rawIn: List<Pair<Float, Float>>?,
+    private fun emaSoft(
+        prev: Track, rawIn: List<Pair<Float, Float>>?,
     ): List<Pair<Float, Float>>? {
         rawIn ?: return null
-        val prev = inst.track
-        if (prev == null || prev.points.size != rawIn.size) {
+        if (prev.points.size != rawIn.size) {
             return rawIn
         }
 
@@ -574,6 +610,15 @@ class OverlayView @JvmOverloads constructor(
                 drawLabel(canvas, screenRect, det, classColor, anchorTop = anchorTop)
             }
         }
+    }
+
+    /** True when the first dots of two chains are within FIRST_DOT_GATE. */
+    private fun firstDotClose(
+        prev: Array<Pair<Float, Float>>, cur: List<Pair<Float, Float>>,
+    ): Boolean {
+        val dx = prev[0].first - cur[0].first
+        val dy = prev[0].second - cur[0].second
+        return sqrt(dx * dx + dy * dy) <= FIRST_DOT_GATE
     }
 
     /** True when a dot chain loops (first/last within ~2 grid steps). */
