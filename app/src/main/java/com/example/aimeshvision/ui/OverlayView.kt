@@ -212,7 +212,6 @@ class OverlayView @JvmOverloads constructor(
                         val inst = assignments[det]
                         val outChains = ArrayList<List<Pair<Float, Float>>>(normChains.size)
                         val secTracks = ArrayList<Track?>(normChains.size)
-                        var anchor: Float? = null
 
                         normChains.forEachIndexed { ci, chain ->
                             val isPrimary = ci == 0   // chains arrive sorted desc by size
@@ -314,28 +313,30 @@ class OverlayView @JvmOverloads constructor(
 
         fun subpixel(sx: Int, sy: Int): Pair<Float, Float> {
             val aS = alpha(sx, sy).toFloat()
-            // Neighbors: pick the background one with the strongest gradient.
-            var bestT = 0.5f
+            // Neighbors: prefer the background one with the STRONGEST gradient
+            // (largest aS - aN) - the most definitive edge for this pixel.
             var bestDx = 0f
             var bestDy = 0f
+            var bestT = 0.5f
+            var bestGrad = -1f
             val cands = listOf(sx - 1 to sy, sx + 1 to sy, sx to sy - 1, sx to sy + 1)
             for ((nx, ny) in cands) {
                 val aN = alpha(nx, ny).toFloat()
                 if (aN >= 128f) continue
-                val denom = aS - aN
-                if (denom < 1f) continue
-                val t = ((aS - 128f) / denom).coerceIn(0f, 1f)
-                if (t > bestT || bestDx == 0f && bestDy == 0f) {
-                    // keep the candidate giving the farthest crossing from
-                    // the solid center (most informative edge)
-                    if (t >= bestT || bestDx == 0f && bestDy == 0f) {
-                        bestT = t
-                        bestDx = (nx - sx).toFloat()
-                        bestDy = (ny - sy).toFloat()
-                    }
+                val grad = aS - aN
+                if (grad < 1f) continue
+                val t = ((aS - 128f) / grad).coerceIn(0f, 1f)
+                if (grad > bestGrad) {
+                    bestGrad = grad
+                    bestT = t
+                    bestDx = (nx - sx).toFloat()
+                    bestDy = (ny - sy).toFloat()
                 }
             }
-            return (sx + bestDx * (1f - bestT)) to (sy + bestDy * (1f - bestT))
+            // t is the fraction FROM the solid pixel toward the neighbor
+            // (alpha(sx + t*dx) = 128 exactly). Final reviewer fix: the
+            // previous code used (1 - t), placing weak-edge dots ~1px OUTSIDE.
+            return (sx + bestDx * bestT) to (sy + bestDy * bestT)
         }
 
         val dots = ArrayList<Pair<Float, Float>>(512)
@@ -367,18 +368,20 @@ class OverlayView @JvmOverloads constructor(
     private fun chainNearest(dots: List<Pair<Float, Float>>): List<List<Pair<Float, Float>>> {
         if (dots.size < 3) return emptyList()
 
-        // Grid lookup: dot hashed by its ROUNDED integer cell (subpixel dots
-        // keep float positions; the cell is only for O(1) neighbor search).
-        // No two dots share a cell (extraction grid is unique per cell).
-        fun cell(x: Float, y: Float): Long =
-            (Math.round(y / DOT_GRID_STEP).toLong() shl 21) + Math.round(x / DOT_GRID_STEP)
+        // Grid lookup: dots hashed by ROUNDED integer cell. Subpixel lerp can
+        // shift a dot across its cell boundary, so a cell may hold up to 2
+        // dots - store LISTS; the walk scans every dot in each candidate cell
+        // (final reviewer fix: single-value cells silently DROPPED dots on
+        // diagonal borders, dashing outlines).
         val maxGx = dots.maxOf { Math.round(it.first / DOT_GRID_STEP) }
         val maxGy = dots.maxOf { Math.round(it.second / DOT_GRID_STEP) }
-        val grid = HashMap<Long, Int>(dots.size * 2)
+        val grid = HashMap<Long, MutableList<Int>>(dots.size * 2)
         dots.forEachIndexed { idx, (x, y) ->
             val cx = Math.round(x / DOT_GRID_STEP)
             val cy = Math.round(y / DOT_GRID_STEP)
-            if (cx in 0..maxGx && cy in 0..maxGy) grid[cy.toLong() * (maxGx + 1) + cx] = idx
+            if (cx in 0..maxGx && cy in 0..maxGy) {
+                grid.getOrPut(cy.toLong() * (maxGx + 1) + cx) { mutableListOf() }.add(idx)
+            }
         }
 
         val used = BooleanArray(dots.size)
@@ -411,15 +414,18 @@ class OverlayView @JvmOverloads constructor(
                         val ngy = gy + dy
                         if (ngx < 0 || ngy < 0 || ngx > maxGx || ngy > maxGy) continue
                         val key = ngy.toLong() * (maxGx + 1) + ngx
-                        val idx = grid[key] ?: continue
-                        if (used[idx]) continue
-                        val step = sqrt((dx * dx + dy * dy).toDouble())
-                        // Prefer continuing in the current direction (straighter
-                        // border walk) with distance as the tiebreaker.
-                        val dirLen = kotlin.math.hypot(dirX.toDouble(), dirY.toDouble())
-                        val dot = (dirX * dx + dirY * dy) / (step * (if (dirLen == 0.0) 1.0 else dirLen))
-                        val score = step - 0.5 * dot
-                        if (score < bestScore) { bestScore = score; bestIdx = idx }
+                        val cellDots = grid[key] ?: continue
+                        for (idx in cellDots) {
+                            if (used[idx]) continue
+                            val step = sqrt((dx * dx + dy * dy).toDouble())
+                            // Prefer continuing in the current direction
+                            // (straighter border walk), distance tiebreak.
+                            val dirLen = kotlin.math.hypot(dirX.toDouble(), dirY.toDouble())
+                            val dot = (dirX * dx + dirY * dy) /
+                                (step * (if (dirLen == 0.0) 1.0 else dirLen))
+                            val score = step - 0.5 * dot
+                            if (score < bestScore) { bestScore = score; bestIdx = idx }
+                        }
                     }
                 }
                 if (bestIdx < 0) break   // no adjacent dot free: end this chain
@@ -629,13 +635,25 @@ class OverlayView @JvmOverloads constructor(
         return sqrt(dx * dx + dy * dy) <= FIRST_DOT_GATE
     }
 
-    /** True when a dot chain loops (first/last within ~2 grid steps). */
+    /** Mask-space closure gap threshold: 4 mask px (2 grid steps), squared. */
+    private const val CLOSE_GAP2_MASK = 16f
+
+    /**
+     * True when a dot chain loops (first/last within ~2 grid steps). The gap
+     * is compared in MASK pixels - the old 8-screen-px threshold sat BELOW
+     * the real inter-dot screen distance (~2 mask px = 13+ screen px), so
+     * every genuine loop was misclassified open (final reviewer fix).
+     */
     private fun isClosedChain(
         chain: List<Pair<Float, Float>>, maskRect: RectF,
     ): Boolean {
         val gapX = (chain[0].first - chain[chain.size - 1].first) * maskRect.width()
         val gapY = (chain[0].second - chain[chain.size - 1].second) * maskRect.height()
-        return (gapX * gapX + gapY * gapY) < 64f
+        val sx = maskRect.width() / 128f   // approx mask px -> screen px scale
+        val sy = maskRect.height() / 128f
+        val gx = gapX / sx
+        val gy = gapY / sy
+        return (gx * gx + gy * gy) < CLOSE_GAP2_MASK
     }
 
     private val filterCache = HashMap<Int, android.graphics.ColorFilter>()
@@ -687,10 +705,16 @@ class OverlayView @JvmOverloads constructor(
         }
 
         // Closure test: last dot within ~2 grid steps of the first - closing
-        // an OPEN chain would draw a straight cut across the mesh (reviewer #3).
+        // an OPEN chain would draw a straight cut across the mesh (reviewer
+        // #3). Compared in MASK px (see isClosedChain - screen-px threshold
+        // was below real inter-dot distance, misclassifying every loop).
         val gapX = (dots[0].first - dots[n - 1].first) * maskRect.width()
         val gapY = (dots[0].second - dots[n - 1].second) * maskRect.height()
-        val closes = (gapX * gapX + gapY * gapY) < 64f
+        val sxScale = maskRect.width() / 128f
+        val syScale = maskRect.height() / 128f
+        val mgx = gapX / sxScale
+        val mgy = gapY / syScale
+        val closes = (mgx * mgx + mgy * mgy) < CLOSE_GAP2_MASK
 
         val mids = FloatArray(n * 2)
         val segs = if (closes) n else n - 1
