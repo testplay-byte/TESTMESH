@@ -471,9 +471,8 @@ class OverlayView @JvmOverloads constructor(
      * stable frame to frame; a size change falls back to the raw chain.
      */
     private fun emaSoft(
-        prev: Track, rawIn: List<Pair<Float, Float>>?,
-    ): List<Pair<Float, Float>>? {
-        rawIn ?: return null
+        prev: Track, rawIn: List<Pair<Float, Float>>,
+    ): List<Pair<Float, Float>> {
         if (prev.points.size != rawIn.size) {
             return rawIn
         }
