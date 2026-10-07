@@ -596,10 +596,12 @@ class OverlayView @JvmOverloads constructor(
         val path = Path()
         path.moveTo(mids[0], mids[1])
         for (i in 0 until segs) {
-            val j = (i + 1) % n
+            // Control = the SHARED dot between the two midpoints (pts[i+1]
+            // ends at mids[i], which spans dots i..i+1) - reviewer 3's
+            // off-by-one: the bulge must hug the dot between its anchors.
             path.quadTo(
-                pts[j * 2], pts[j * 2 + 1],      // control = real border dot
-                mids[i * 2], mids[i * 2 + 1],    // anchor   = midpoint
+                pts[((i + 1) % n) * 2], pts[((i + 1) % n) * 2 + 1],
+                mids[i * 2], mids[i * 2 + 1],
             )
         }
         if (closes) path.close()
