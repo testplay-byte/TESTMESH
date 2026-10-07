@@ -85,6 +85,11 @@ class OverlayView @JvmOverloads constructor(
 
         // Mask-space closure gap threshold: 4 mask px (2 grid steps), squared.
         private const val CLOSE_GAP2_MASK = 16f
+
+        // Max single walk step in mask px (~1.5 grid steps): with subpixel
+        // lerp, extreme soft-edge dots can round 2 cells away - only allow
+        // such steps when the real pixel distance stays small.
+        private const val MAX_STEP_PX = 3.0
     }
 
     /** A detection with its per-frame geometry precomputed in [setResults]. */
@@ -410,26 +415,36 @@ class OverlayView @JvmOverloads constructor(
                 // Subpixel dots: the candidate's cell must match (gx+dx, gy+dy).
                 var bestIdx = -1
                 var bestScore = Double.MAX_VALUE
-                for (dy in -1..1) {
-                    for (dx in -1..1) {
-                        if (dx == 0 && dy == 0) continue
+                for (dy in -2..2) {
+                    for (dx in -2..2) {
                         val ngx = gx + dx
                         val ngy = gy + dy
                         if (ngx < 0 || ngy < 0 || ngx > maxGx || ngy > maxGy) continue
                         val key = ngy.toLong() * (maxGx + 1) + ngx
                         val cellDots = grid[key] ?: continue
                         for (idx in cellDots) {
-                            if (used[idx]) continue
-                            val step = sqrt((dx * dx + dy * dy).toDouble())
-                            // Prefer continuing in the current direction
-                            // (straighter border walk), distance tiebreak.
+                            if (used[idx] || idx == startIdx && chain.size == 1) continue
+                            // Same-cell dots (subpixel stacking) must remain
+                            // connectable: score by the ACTUAL pixel delta,
+                            // not the cell offset (verification-round fix).
+                            val px = dots[idx].first - cx
+                            val py = dots[idx].second - cy
+                            val step = sqrt((px * px + py * py).toDouble())
+                            if (step < 1e-6) continue
                             val dirLen = kotlin.math.hypot(dirX.toDouble(), dirY.toDouble())
-                            val dot = (dirX * dx + dirY * dy) /
-                                (step * (if (dirLen == 0.0) 1.0 else dirLen))
+                            val dot = if (dirLen == 0.0) 0.0 else
+                                (dirX * px + dirY * py) / (step * dirLen)
                             val score = step - 0.5 * dot
                             if (score < bestScore) { bestScore = score; bestIdx = idx }
                         }
                     }
+                }
+                // Hard geometric cap on any step (mask px): the walk may never
+                // jump a border gap regardless of cell arithmetic.
+                if (bestIdx >= 0) {
+                    val bx = dots[bestIdx].first - cx
+                    val by = dots[bestIdx].second - cy
+                    if (sqrt(bx * bx + by * by) > MAX_STEP_PX) bestIdx = -1
                 }
                 if (bestIdx < 0) break   // no adjacent dot free: end this chain
                 dirX = dots[bestIdx].first - cx
@@ -566,13 +581,13 @@ class OverlayView @JvmOverloads constructor(
                 // (reviewer #2: longest-chain-only dropped blobs).
                 val paths = if (showSmoothOutline && item.chains.isNotEmpty()) {
                     item.chains.mapNotNull { chain ->
-                        if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
+                        if (chain.size >= 3) buildSmoothPath(chain, maskRect, mask) else null
                     }
                 } else emptyList()
                 // Parallel closure flags (same order as paths): only CLOSED
                 // chains may be used as clip regions (New Bug 3).
                 val closedFlags = item.chains.map { chain ->
-                    if (chain.size < 3) false else isClosedChain(chain, maskRect)
+                    if (chain.size < 3) false else isClosedChain(chain, maskRect, mask)
                 }
 
                 // Stage 3E: stroke FIRST, then the tinted mask (clipped to
@@ -645,12 +660,12 @@ class OverlayView @JvmOverloads constructor(
      * every genuine loop was misclassified open (final reviewer fix).
      */
     private fun isClosedChain(
-        chain: List<Pair<Float, Float>>, maskRect: RectF,
+        chain: List<Pair<Float, Float>>, maskRect: RectF, mask: Bitmap,
     ): Boolean {
         val gapX = (chain[0].first - chain[chain.size - 1].first) * maskRect.width()
         val gapY = (chain[0].second - chain[chain.size - 1].second) * maskRect.height()
-        val sx = maskRect.width() / 128f   // approx mask px -> screen px scale
-        val sy = maskRect.height() / 128f
+        val sx = maskRect.width() / mask.width.toFloat()
+        val sy = maskRect.height() / mask.height.toFloat()
         val gx = gapX / sx
         val gy = gapY / sy
         return (gx * gx + gy * gy) < CLOSE_GAP2_MASK
@@ -693,7 +708,7 @@ class OverlayView @JvmOverloads constructor(
      * represented exactly, corners stay sharp where the dots say so.
      */
     private fun buildSmoothPath(
-        dots: List<Pair<Float, Float>>, maskRect: RectF,
+        dots: List<Pair<Float, Float>>, maskRect: RectF, mask: Bitmap,
     ): Path {
         val n = dots.size
         if (n < 3) return Path()
@@ -710,8 +725,8 @@ class OverlayView @JvmOverloads constructor(
         // was below real inter-dot distance, misclassifying every loop).
         val gapX = (dots[0].first - dots[n - 1].first) * maskRect.width()
         val gapY = (dots[0].second - dots[n - 1].second) * maskRect.height()
-        val sxScale = maskRect.width() / 128f
-        val syScale = maskRect.height() / 128f
+        val sxScale = maskRect.width() / mask.width.toFloat()
+        val syScale = maskRect.height() / mask.height.toFloat()
         val mgx = gapX / sxScale
         val mgy = gapY / syScale
         val closes = (mgx * mgx + mgy * mgy) < CLOSE_GAP2_MASK
