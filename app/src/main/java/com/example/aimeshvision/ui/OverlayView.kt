@@ -442,26 +442,25 @@ class OverlayView @JvmOverloads constructor(
             return rawIn
         }
 
-        // Chain-level gate: if ANY dot exceeds the distance limit, the chain
-        // shape changed wholesale (re-acquire) - blending per-dot would mix
-        // two frames into a kinked "Frankenstein" outline (reviewer #10).
-        for (i in rawIn.indices) {
-            val px = prev.points[i].first
-            val py = prev.points[i].second
-            val dx = rawIn[i].first - px
-            val dy = rawIn[i].second - py
-            if (sqrt(dx * dx + dy * dy) > MAX_TRACK_DISTANCE) return rawIn
-        }
+        // Stage 2D: soft per-dot gate. Correspondence is guaranteed upstream
+        // (length match + canonical winding from Stage 3F), so the hard
+        // chain-level snap (which made every fast move pop to raw) becomes a
+        // continuous blend: blend weight fades from full smoothing at d=0 to
+        // raw at d=MAX_TRACK_DISTANCE. Small changes stay smooth; large
+        // changes pass through instead of popping.
         val out = ArrayList<Pair<Float, Float>>(rawIn.size)
         for (i in rawIn.indices) {
             val px = prev.points[i].first
             val py = prev.points[i].second
             val nx = rawIn[i].first
             val ny = rawIn[i].second
-            out.add(
-                px + (nx - px) * (1f - SMOOTHING) to
-                    py + (ny - py) * (1f - SMOOTHING)
-            )
+            val dx = nx - px
+            val dy = ny - py
+            val d = sqrt(dx * dx + dy * dy)
+            // weight on the NEW position: 0 (full smoothing) .. 1 (raw)
+            val rawWeight = (d / MAX_TRACK_DISTANCE).coerceIn(0f, 1f)
+            val blend = rawWeight + (1f - rawWeight) * (1f - SMOOTHING)
+            out.add(px + dx * blend to py + dy * blend)
         }
         return out
     }
