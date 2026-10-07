@@ -82,6 +82,9 @@ class OverlayView @JvmOverloads constructor(
         // first-dot proximity gate (normalized) guarding every correspondence.
         private const val MAX_SECONDARY_EMA = 2   // primary + 2 secondary = top 3
         private const val FIRST_DOT_GATE = 0.03f
+
+        // Mask-space closure gap threshold: 4 mask px (2 grid steps), squared.
+        private const val CLOSE_GAP2_MASK = 16f
     }
 
     /** A detection with its per-frame geometry precomputed in [setResults]. */
@@ -634,9 +637,6 @@ class OverlayView @JvmOverloads constructor(
         val dy = prev[0].second - cur[0].second
         return sqrt(dx * dx + dy * dy) <= FIRST_DOT_GATE
     }
-
-    /** Mask-space closure gap threshold: 4 mask px (2 grid steps), squared. */
-    private const val CLOSE_GAP2_MASK = 16f
 
     /**
      * True when a dot chain loops (first/last within ~2 grid steps). The gap
