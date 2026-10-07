@@ -5,36 +5,42 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
-import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.View
 import com.example.aimeshvision.inference.Detection
 import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Full-screen canvas that maps normalized detections onto screen space.
  *
- * ARCHITECTURE NOTE (v5 - ring outline): earlier versions traced the mask
- * contour into a smoothed bezier path and CLIPPED the mask to it. That design
- * could never be both smooth AND accurate: wherever the fitted line lagged
- * behind the real mask (thin fingertips, fast motion), the clip cut the mesh
- * off. v5 removes contour tracing and clipping entirely.
+ * ARCHITECTURE NOTE (v8 - smooth line, centered on the boundary): the outline
+ * is a **quadratic-bezier curve fitted to the mask contour**, stroked ON the
+ * boundary - half the stroke lies on the mesh, half outside it. The mesh is
+ * CLIPPED to the path so no mesh pixel shows outside the line. This is the
+ * old smooth look, with its two former bugs fixed:
+ *  - v3 bug A (garbage/off-screen path): contour points are NORMALIZED to
+ *    0..1 mask space before screen mapping.
+ *  - round-7 bug B (scribble): the contour is ROTATED to start nearest the
+ *    previous frame's first point before temporal blending.
+ * The v5/v7 ring approach (bitmap dilation) was pixelated because it shares
+ * the mask's own resolution - a fitted curve is resolution-independent.
  *
- * The outline is now built FROM THE MASK'S OWN PIXELS: the silhouette is
- * dilated by a few pixels across 16 directions, then the original mask is
- * subtracted - leaving a ring that hugs the mask exactly, everywhere,
- * by construction. Because nothing is ever clipped, the mask can never be
- * cut off: fingertips, edges, corners are always inside both mesh and line.
+ * NO temporal bitmap blending: the "shadow" was exactly that - last frame's
+ * ring unioned into the current one. Temporal smoothing now applies only to
+ * the fitted POINTS (EMA), which moves with the mesh and never trails.
+ *
+ * All analysis (tracing, resampling, EMA) happens once per frame in
+ * [setResults]; [onDraw] only draws cached geometry.
  *
  * Rendering per detection:
- *  1. Smooth outline ON: tinted mask (full, uncut) + vibrant ring on top.
- *  2. Smooth outline OFF: tinted mask only.
+ *  1. Smooth outline ON: tinted mesh clipped to the line + vibrant stroke.
+ *  2. Smooth outline OFF: plain tinted mesh.
  *  3. Optional bounding box + corner brackets (user toggle).
  *  4. Label chip: box top when boxes are shown; the temporally smoothed top
  *     edge of the actual silhouette when they are hidden.
@@ -57,24 +63,11 @@ class OverlayView @JvmOverloads constructor(
         private const val LABEL_CORNER_R = 14f
         private const val MASK_ALPHA = 110
 
-        // ── ring outline ─────────────────────────────────────────────────
-        // The line is the ring between two dilations of the mask:
-        //   line = dilate(mask, RING_OUT_PX) - dilate(mask, RING_IN_PX)
-        // Both dilations are stamp-based (no erosion pitfalls), the band hugs
-        // the mask's true boundary everywhere, and its width in mask pixels is
-        // RING_OUT_PX - RING_IN_PX ≈ 0.75px ≈ 3 screen px at 512 input.
-        // Sub-pixel stamp offsets + bilinear filtering feather the edges.
-        private const val RING_OUT_PX = 1.05f
-        private const val RING_IN_PX = 0.3f
-        private const val RING_DIRECTIONS = 24
+        // ── outline line ─────────────────────────────────────────────────
+        private const val LINE_STROKE_W = 5f     // screen px (old look)
+        private const val RESAMPLE_POINTS = 48   // points around the silhouette
 
-        // Temporal blend: last frame's ring is unioned in at this alpha, which
-        // softens single-frame edge flicker (the smoothness of the old EMA
-        // line, with zero curve fitting). Regions the mask truly drops decay
-        // geometrically and vanish in a few frames - no ghosting.
-        private const val RING_TEMPORAL_ALPHA = 120
-
-        // ── temporal smoothing (label anchor EMA) ────────────────────────
+        // ── temporal smoothing (point EMA + label anchor) ────────────────
         private const val SMOOTHING = 0.45f
         private const val MAX_TRACK_DISTANCE = 0.35f // normalized; beyond = re-acquire
     }
@@ -82,8 +75,8 @@ class OverlayView @JvmOverloads constructor(
     /** A detection with its per-frame geometry precomputed in [setResults]. */
     private class PreparedItem(
         val det: Detection,
-        /** Outline ring bitmap (dilated mask minus mask), null = none. */
-        val ring: Bitmap?,
+        /** Smoothed contour, normalized 0..1 in mask space (null = none). */
+        val contour: List<Pair<Float, Float>>?,
         /** Smoothed top edge of the silhouette, normalized 0..1 (null = none). */
         val labelAnchorNorm: Float?,
     )
@@ -100,14 +93,12 @@ class OverlayView @JvmOverloads constructor(
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         isFilterBitmap = true
     }
-    private val ringStampPaint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val ringCutPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = LINE_STROKE_W
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
-    private val temporalPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-        alpha = RING_TEMPORAL_ALPHA
-    }
-    private val ringDrawPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val labelBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = COLOR_LABEL_BG
         style = Paint.Style.FILL
@@ -127,190 +118,221 @@ class OverlayView @JvmOverloads constructor(
     var showBoxes: Boolean = true
     var showSmoothOutline: Boolean = false
 
-    // ── label-anchor smoothing (per class id) ────────────────────────────────
-    private class Track(var labelAnchor: Float?)
+    // ── temporal state (per class id; first detection of a class drives it) ──
+    private class Track(
+        val points: Array<Pair<Float, Float>>,
+        var labelAnchor: Float?,
+    )
+
     private val tracks = mutableMapOf<Int, Track>()
 
-    // ── ring scratch pool (no per-frame bitmap churn) ─────────────────────────
-    private val ringPool = ArrayList<Bitmap>(4)
-    private var ringPoolUsed = 0
-
-    /** Last frame's composited ring per class id (temporal smoothing source). */
-    private val prevRings = HashMap<Int, Bitmap>()
-
-    private fun obtainRing(w: Int, h: Int): Bitmap {
-        while (ringPoolUsed >= ringPool.size) {
-            ringPool.add(Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888))
-        }
-        val bmp = ringPool[ringPoolUsed]
-        return if (bmp.width != w || bmp.height != h) {
-            // reconfigure() cannot grow a bitmap - replace it instead.
-            val fresh = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            ringPool[ringPoolUsed] = fresh
-            fresh
-        } else {
-            bmp
-        }.also { ringPoolUsed++ }
-    }
-
-    private fun releaseUnusedRings() {
-        while (ringPool.size > ringPoolUsed) {
-            ringPool.removeAt(ringPool.size - 1).recycle()
-        }
-    }
-
-    /** Called once per inference result: precomputes rings + anchors, redraws. */
+    /** Called once per inference result: precomputes geometry, then redraws. */
     fun setResults(results: List<Detection>, inputWidth: Int, inputHeight: Int) {
         sourceImageWidth = inputWidth
         sourceImageHeight = inputHeight
-        ringPoolUsed = 0
 
         val seenClasses = mutableSetOf<Int>()
         val items = ArrayList<PreparedItem>(results.size)
         for (det in results) {
             val mask = det.maskBitmap
-            var ring: Bitmap? = null
+            var contour: List<Pair<Float, Float>>? = null
             var anchor: Float? = null
 
             if (mask != null) {
                 val firstOfClass = seenClasses.add(det.classId)
-                if (showSmoothOutline) {
-                    ring = buildRing(det.classId, mask)
-                }
-                val rawTop = rawTopNorm(mask)
-                anchor = if (firstOfClass) {
-                    emaAnchor(det.classId, rawTop)
-                } else {
-                    rawTop
+                val raw = traceContour(mask)
+                if (!raw.isNullOrEmpty()) {
+                    val resampled = resampleClosed(raw, RESAMPLE_POINTS)
+                    // Bug A fix: normalize to 0..1 mask space BEFORE any
+                    // screen mapping (v3 used raw mask pixels -> off-screen).
+                    val norm = resampled.map { p ->
+                        (p.first / mask.width) to (p.second / mask.height)
+                    }
+                    if (firstOfClass) {
+                        contour = emaContour(det.classId, norm)
+                        anchor = emaAnchor(det.classId, contour)
+                    } else {
+                        contour = norm
+                        anchor = norm.minOfOrNull { it.second }
+                    }
                 }
             }
-            items.add(PreparedItem(det, ring, anchor))
+            items.add(PreparedItem(det, contour, anchor))
         }
         prepared = items
-        releaseUnusedRings()
         invalidate()
     }
 
     fun clear() {
         prepared = emptyList()
-        ringPoolUsed = 0
-        releaseUnusedRings()
-        releasePrevRings()
         invalidate()
     }
 
-    /** Forgets the label-anchor smoothing state (e.g. when the model changes). */
+    /** Forgets temporal smoothing state (e.g. when the model changes). */
     fun resetSmoothing() {
         tracks.clear()
         prepared = emptyList()
-        ringPoolUsed = 0
-        releaseUnusedRings()
-        releasePrevRings()
         invalidate()
     }
 
-    private fun releasePrevRings() {
-        prevRings.values.forEach { it.recycle() }
-        prevRings.clear()
-    }
-
-    // ── ring construction: dilate the silhouette, subtract the mask ───────────
+    // ── temporal point smoothing ──────────────────────────────────────────────
 
     /**
-     * Builds the outline LINE as the ring between two dilations of the mask:
-     *   line = dilate(mask, RING_OUT_PX) - dilate(mask, RING_IN_PX)
-     * (An earlier attempt derived the inner half via "erosion" with
-     * sequential DST_OUT - mathematically wrong: the union of all inward
-     * shifts is itself a dilation, so that step erased the whole canvas.
-     * Two-radius subtraction is equally cheap and provably correct.)
-     *
-     * The band hugs the mask's own boundary EXACTLY - fingers, corners, thin
-     * protrusions included - and sub-pixel stamp offsets with bilinear
-     * filtering feather its edges. Finally it is unioned with a faded copy of
-     * last frame's ring so single-frame edge flicker melts away.
+     * EMA-blends the raw (normalized) contour with the previous track.
+     * Bug B fix: the tracer may start at any pixel; if the start pixel jumps
+     * between frames the point correspondence twists and the line scribbles.
+     * The raw list is ROTATED to start nearest the previous frame's point 0
+     * before blending.
      */
-    private fun buildRing(classId: Int, mask: Bitmap): Bitmap {
-        val w = mask.width
-        val h = mask.height
-
-        // Outer dilation (this bitmap becomes the final ring).
-        val ring = obtainRing(w, h)
-        val c = Canvas(ring)
-        c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-        stampDilation(c, mask, RING_OUT_PX)
-
-        // Inner dilation on a second scratch bitmap.
-        val inner = obtainRing(w, h)
-        val ci = Canvas(inner)
-        ci.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-        stampDilation(ci, mask, RING_IN_PX)
-
-        // line = outer - inner.
-        c.drawBitmap(inner, 0f, 0f, ringCutPaint)
-
-        // Temporal blend with last frame's ring.
-        prevRings[classId]?.let { prev ->
-            if (prev.width == w && prev.height == h) {
-                c.drawBitmap(prev, 0f, 0f, temporalPaint)
-            }
+    private fun emaContour(
+        classId: Int, rawIn: List<Pair<Float, Float>>,
+    ): List<Pair<Float, Float>> {
+        val prev = tracks[classId]
+        if (prev == null || prev.points.size != rawIn.size) {
+            tracks[classId] = Track(rawIn.toTypedArray(), prev?.labelAnchor)
+            return rawIn
         }
-        storePrevRing(classId, ring)
-        return ring
-    }
 
-    /** Stamps [mask] in [RING_DIRECTIONS] directions at [radius] (dilation). */
-    private fun stampDilation(c: Canvas, mask: Bitmap, radius: Float) {
-        for (i in 0 until RING_DIRECTIONS) {
-            val angle = (i * 2.0 * Math.PI) / RING_DIRECTIONS
-            c.drawBitmap(
-                mask,
-                (cos(angle) * radius).toFloat(),
-                (sin(angle) * radius).toFloat(),
-                ringStampPaint,
+        // Rotate raw so index 0 is closest to the previous frame's point 0.
+        val n = rawIn.size
+        var bestIdx = 0
+        var bestD = Float.MAX_VALUE
+        val p0 = prev.points[0]
+        for (i in 0 until n) {
+            val dx = rawIn[i].first - p0.first
+            val dy = rawIn[i].second - p0.second
+            val d = dx * dx + dy * dy
+            if (d < bestD) { bestD = d; bestIdx = i }
+        }
+        val raw = ArrayList<Pair<Float, Float>>(n)
+        for (i in 0 until n) raw.add(rawIn[(bestIdx + i) % n])
+
+        val out = ArrayList<Pair<Float, Float>>(n)
+        for (i in 0 until n) {
+            val px = prev.points[i].first
+            val py = prev.points[i].second
+            val nx = raw[i].first
+            val ny = raw[i].second
+            val dist = sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
+            out.add(
+                if (dist > MAX_TRACK_DISTANCE) nx to ny   // jump = re-acquire
+                else px + (nx - px) * (1f - SMOOTHING) to
+                    py + (ny - py) * (1f - SMOOTHING)
             )
         }
-    }
-
-    /** Keeps a copy of [ring] as next frame's temporal-blend source. */
-    private fun storePrevRing(classId: Int, ring: Bitmap) {
-        val prev = prevRings.getOrPut(classId) {
-            Bitmap.createBitmap(ring.width, ring.height, Bitmap.Config.ARGB_8888)
-        }
-        if (prev.width != ring.width || prev.height != ring.height) {
-            prev.recycle()
-            prevRings[classId] =
-                Bitmap.createBitmap(ring.width, ring.height, Bitmap.Config.ARGB_8888)
-        }
-        val target = prevRings[classId]!!
-        val pc = Canvas(target)
-        pc.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-        pc.drawBitmap(ring, 0f, 0f, ringStampPaint)
+        tracks[classId] = Track(out.toTypedArray(), prev.labelAnchor)
+        return out
     }
 
     /** EMA-blends the label anchor (top edge Y, normalized) across frames. */
-    private fun emaAnchor(classId: Int, raw: Float?): Float? {
-        raw ?: return null
+    private fun emaAnchor(classId: Int, contour: List<Pair<Float, Float>>?): Float? {
+        val raw = contour?.minOfOrNull { it.second } ?: return null
         val prev = tracks[classId]?.labelAnchor
         val smoothed = if (prev == null || abs(raw - prev) > MAX_TRACK_DISTANCE) {
             raw
         } else {
             prev + (raw - prev) * (1f - SMOOTHING)
         }
-        tracks.getOrPut(classId) { Track(null) }.labelAnchor = smoothed
+        tracks[classId]?.labelAnchor = smoothed
         return smoothed
     }
 
-    /** Topmost opaque row of the mask as a 0..1 fraction of its height. */
-    private fun rawTopNorm(mask: Bitmap): Float? {
+    // ── contour extraction ────────────────────────────────────────────────────
+
+    /**
+     * Moore-neighborhood border tracing on the mask alpha, lightly
+     * simplified. Returns null when the mask is empty or degenerate.
+     */
+    private fun traceContour(mask: Bitmap): List<Pair<Int, Int>>? {
         val w = mask.width
-        val px = IntArray(w)
-        for (y in 0 until mask.height) {
-            mask.getPixels(px, 0, w, 0, y, w, 1)
+        val h = mask.height
+        if (w < 4 || h < 4) return null
+
+        val pixels = IntArray(w * h)
+        mask.getPixels(pixels, 0, w, 0, 0, w, h)
+        fun solid(x: Int, y: Int): Boolean =
+            x in 0 until w && y in 0 until h && (pixels[y * w + x] ushr 24) > 128
+
+        var sx = -1; var sy = -1
+        outer@ for (y in 0 until h) {
             for (x in 0 until w) {
-                if (px[x] != 0) return y.toFloat() / mask.height
+                if (solid(x, y)) { sx = x; sy = y; break@outer }
             }
         }
-        return null
+        if (sx < 0) return null
+
+        val dirs = arrayOf(
+            1 to 0, 1 to 1, 0 to 1, -1 to 1, -1 to 0, -1 to -1, 0 to -1, 1 to -1
+        )
+        val contour = ArrayList<Pair<Int, Int>>(256)
+        var cx = sx; var cy = sy
+        var dir = 0
+        var steps = 0
+        val maxSteps = w * h
+        do {
+            contour.add(cx to cy)
+            var found = false
+            for (i in 0 until 8) {
+                val nd = (dir + 6 + i) % 8
+                val nx = cx + dirs[nd].first
+                val ny = cy + dirs[nd].second
+                if (solid(nx, ny)) {
+                    cx = nx; cy = ny; dir = nd; found = true
+                    break
+                }
+            }
+            if (!found) break
+            steps++
+        } while ((cx != sx || cy != sy) && steps < maxSteps)
+
+        if (contour.size < 8) return null
+        return contour
+    }
+
+    /**
+     * Resamples a closed contour to exactly [n] evenly-spaced points by arc
+     * length, stabilizing point correspondence between frames (required for
+     * meaningful EMA blending).
+     */
+    private fun resampleClosed(
+        contour: List<Pair<Int, Int>>, n: Int,
+    ): List<Pair<Float, Float>> {
+        if (contour.size < 3) return contour.map { it.first.toFloat() to it.second.toFloat() }
+
+        var total = 0f
+        val dist = FloatArray(contour.size)
+        for (i in contour.indices) {
+            val a = contour[i]
+            val b = contour[(i + 1) % contour.size]
+            val d = sqrt(
+                (b.first - a.first).toFloat() * (b.first - a.first) +
+                    (b.second - a.second).toFloat() * (b.second - a.second)
+            )
+            dist[i] = d
+            total += d
+        }
+        if (total <= 0f) return contour.map { it.first.toFloat() to it.second.toFloat() }
+
+        val step = total / n
+        val out = ArrayList<Pair<Float, Float>>(n)
+        var i = 0
+        var traveled = 0f
+        for (k in 0 until n) {
+            val target = k * step
+            while (i < contour.size - 1 && traveled + dist[i] < target) {
+                traveled += dist[i]
+                i++
+            }
+            val a = contour[i]
+            val b = contour[(i + 1) % contour.size]
+            val seg = dist[i].coerceAtLeast(1e-6f)
+            val t = ((target - traveled) / seg).coerceIn(0f, 1f)
+            out.add(
+                a.first + (b.first - a.first) * t to
+                    a.second + (b.second - a.second) * t
+            )
+        }
+        return out
     }
 
     // ── drawing (cached geometry only) ────────────────────────────────────────
@@ -341,17 +363,25 @@ class OverlayView @JvmOverloads constructor(
             val mask = det.maskBitmap
             if (mask != null) {
                 val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
+                val path = if (showSmoothOutline && item.contour != null) {
+                    buildSmoothPath(item.contour, maskRect)
+                } else null
 
-                // The mask is ALWAYS drawn in full - nothing is ever clipped,
-                // so the mesh can never be cut off anywhere.
-                drawTintedMask(canvas, mask, maskRect, classColor)
+                if (path != null) {
+                    // 1. Mesh strictly inside the line: tinted mask clipped to
+                    //    the fitted boundary curve.
+                    val save = canvas.save()
+                    canvas.clipPath(path)
+                    drawTintedMask(canvas, mask, maskRect, classColor)
+                    canvas.restoreToCount(save)
 
-                item.ring?.let { ring ->
-                    ringDrawPaint.colorFilter = colorFilterFor(
-                        DetectionStyle.vibrantFor(classColor)
-                    )
-                    ringDrawPaint.alpha = 255
-                    canvas.drawBitmap(ring, null, maskRect, ringDrawPaint)
+                    // 2. Vibrant, opaque class-color stroke ON the boundary -
+                    //    half on the mesh, half outside it.
+                    linePaint.color = DetectionStyle.vibrantFor(classColor)
+                    linePaint.alpha = 255
+                    canvas.drawPath(path, linePaint)
+                } else {
+                    drawTintedMask(canvas, mask, maskRect, classColor)
                 }
             }
 
@@ -385,6 +415,39 @@ class OverlayView @JvmOverloads constructor(
         maskPaint.colorFilter = colorFilterFor(classColor)
         maskPaint.alpha = MASK_ALPHA
         canvas.drawBitmap(mask, null, maskRect, maskPaint)
+    }
+
+    /** Builds the closed quadratic-bezier path from normalized contour points. */
+    private fun buildSmoothPath(
+        contour: List<Pair<Float, Float>>, maskRect: RectF,
+    ): Path {
+        val n = contour.size
+        val pts = FloatArray(n * 2)
+        for (i in 0 until n) {
+            pts[i * 2] = maskRect.left + contour[i].first * maskRect.width()
+            pts[i * 2 + 1] = maskRect.top + contour[i].second * maskRect.height()
+        }
+
+        // Midpoints between consecutive points become on-curve anchors; the
+        // original contour points become control points - smooth-curve trick.
+        val mids = FloatArray(n * 2)
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            mids[i * 2] = (pts[i * 2] + pts[j * 2]) / 2f
+            mids[i * 2 + 1] = (pts[i * 2 + 1] + pts[j * 2 + 1]) / 2f
+        }
+
+        val path = Path()
+        path.moveTo(mids[0], mids[1])
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            path.quadTo(
+                pts[j * 2], pts[j * 2 + 1],      // control = real contour point
+                mids[j * 2], mids[j * 2 + 1],    // anchor   = midpoint
+            )
+        }
+        path.close()
+        return path
     }
 
     private fun drawCorners(canvas: Canvas, rect: RectF, color: Int) {
