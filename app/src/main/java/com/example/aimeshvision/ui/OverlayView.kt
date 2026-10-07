@@ -144,18 +144,21 @@ class OverlayView @JvmOverloads constructor(
                 val firstOfClass = seenClasses.add(det.classId)
                 val raw = extractBorderDots(mask)
                 if (raw != null && raw.size >= 8) {
-                    val chained = chainNearest(raw)
-                    // Normalize to 0..1 mask space BEFORE any screen mapping.
-                    val norm = chained.map { p ->
-                        (p.first / mask.width.toFloat()) to
-                            (p.second / mask.height.toFloat())
-                    }
-                    if (firstOfClass) {
-                        dots = emaDots(det.classId, norm)
-                        anchor = emaAnchor(det.classId, dots)
-                    } else {
-                        dots = norm
-                        anchor = norm.minOfOrNull { it.second }
+                    // The longest local chain is the object's main outline.
+                    val chained = chainNearest(raw).firstOrNull()
+                    if (chained != null) {
+                        // Normalize to 0..1 mask space BEFORE any screen mapping.
+                        val norm = chained.map { p ->
+                            (p.first / mask.width.toFloat()) to
+                                (p.second / mask.height.toFloat())
+                        }
+                        if (firstOfClass) {
+                            dots = emaDots(det.classId, norm)
+                            anchor = emaAnchor(det.classId, dots)
+                        } else {
+                            dots = norm
+                            anchor = norm.minOfOrNull { it.second }
+                        }
                     }
                 }
             }
@@ -214,46 +217,85 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Orders the unordered dot set into a boundary walk: each dot connects to
-     * its nearest not-yet-used dot ("dots connect with the nearest dot around
-     * them"). Greedy nearest-neighbor on a planar closed outline follows the
-     * boundary in order; the result is closed by connecting back to the start.
+     * Orders the dot set into a boundary walk that follows the border
+     * LOCALLY: each step moves to an unused dot within one grid cell in the
+     * 8-neighborhood (Chebyshev distance <= 2), preferring the one that keeps
+     * the walk direction straightest. The chain is forbidden from jumping
+     * across the shape - if no adjacent dot is free, the walk ends (or starts
+     * a new chain elsewhere) rather than forcing a long connection.
      */
-    private fun chainNearest(dots: List<Pair<Int, Int>>): List<Pair<Int, Int>> {
-        if (dots.size < 3) return dots
+    private fun chainNearest(dots: List<Pair<Int, Int>>): List<List<Pair<Int, Int>>> {
+        if (dots.size < 3) return emptyList()
 
-        val n = dots.size
-        val used = BooleanArray(n)
-        val order = ArrayList<Pair<Int, Int>>(n)
+        // Grid lookup: dot at (gx, gy) -> index. Chebyshev neighbor searches
+        // become O(1) instead of O(n) per step.
+        val maxGx = dots.maxOf { it.first } / DOT_GRID_STEP
+        val maxGy = dots.maxOf { it.second } / DOT_GRID_STEP
+        val grid = HashMap<Long, Int>(dots.size * 2)
+        dots.forEachIndexed { idx, (x, y) -> grid[(y / DOT_GRID_STEP).toLong() * (maxGx + 1) + (x / DOT_GRID_STEP)] = idx }
 
-        // Start at the topmost dot (deterministic, near the label anchor).
-        var cur = 0
-        for (i in 1 until n) {
-            if (dots[i].second < dots[cur].second ||
-                (dots[i].second == dots[cur].second && dots[i].first < dots[cur].first)
-            ) cur = i
-        }
-        used[cur] = true
-        order.add(dots[cur])
+        val used = BooleanArray(dots.size)
+        val chains = ArrayList<List<Pair<Int, Int>>>()
 
-        for (step in 1 until n) {
-            val cx = dots[cur].first
-            val cy = dots[cur].second
-            var best = -1
-            var bestD = Int.MAX_VALUE
-            for (i in 0 until n) {
-                if (used[i]) continue
-                val dx = dots[i].first - cx
-                val dy = dots[i].second - cy
-                val d = dx * dx + dy * dy
-                if (d < bestD) { bestD = d; best = i }
+        fun tryChain(startIdx: Int): List<Pair<Int, Int>>? {
+            val chain = ArrayList<Pair<Int, Int>>()
+            var cur = startIdx
+            used[cur] = true
+            chain.add(dots[cur])
+            // Walk direction from the previous step (0,0 at the first step).
+            var dirX = 0
+            var dirY = 0
+            while (true) {
+                val cx = dots[cur].first
+                val cy = dots[cur].second
+                val gx = cx / DOT_GRID_STEP
+                val gy = cy / DOT_GRID_STEP
+
+                // Collect unused dots in the 8-neighborhood (Chebyshev <= 2).
+                var bestIdx = -1
+                var bestScore = Double.MAX_VALUE
+                for (dy in -2..2) {
+                    for (dx in -2..2) {
+                        if (dx == 0 && dy == 0) continue
+                        val nx = (gx + dx) * DOT_GRID_STEP + DOT_GRID_STEP / 2
+                        val ny = (gy + dy) * DOT_GRID_STEP + DOT_GRID_STEP / 2
+                        val key = (gy + dy).toLong() * (maxGx + 1) + (gx + dx)
+                        val idx = grid[key] ?: continue
+                        if (used[idx]) continue
+                        if (dots[idx].first != nx || dots[idx].second != ny) continue
+                        val step = sqrt((dx * dx + dy * dy).toDouble())
+                        // Prefer continuing in the current direction (straighter
+                        // border walk) with distance as the tiebreaker.
+                        val dirLen = kotlin.math.hypot(dirX.toDouble(), dirY.toDouble())
+                        val dot = (dirX * dx + dirY * dy) / (step * (if (dirLen == 0.0) 1.0 else dirLen))
+                        val score = step - 0.5 * dot
+                        if (score < bestScore) { bestScore = score; bestIdx = idx }
+                    }
+                }
+                if (bestIdx < 0) break   // no adjacent dot free: end this chain
+                dirX = dots[bestIdx].first - cx
+                dirY = dots[bestIdx].second - cy
+                used[bestIdx] = true
+                chain.add(dots[bestIdx])
+                cur = bestIdx
             }
-            if (best < 0) break
-            used[best] = true
-            order.add(dots[best])
-            cur = best
+            return if (chain.size >= 8) chain else null
         }
-        return order
+
+        // Start chains from the topmost unused dot (deterministic).
+        while (true) {
+            var start = -1
+            for (i in dots.indices) {
+                if (!used[i] &&
+                    (start < 0 || dots[i].second < dots[start].second ||
+                        (dots[i].second == dots[start].second && dots[i].first < dots[start].first))
+                ) start = i
+            }
+            if (start < 0) break
+            tryChain(start)?.let { chains.add(it) }
+        }
+        // Longest chain = the object's main outline.
+        return chains.sortedByDescending { it.size }
     }
 
     // ── temporal smoothing ────────────────────────────────────────────────────
