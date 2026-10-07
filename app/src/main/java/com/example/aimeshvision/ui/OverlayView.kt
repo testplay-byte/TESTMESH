@@ -566,18 +566,34 @@ class OverlayView @JvmOverloads constructor(
                     if (chain.size < 3) false else isClosedChain(chain, maskRect)
                 }
 
-                // 1. Mesh inside the line: successive clipPath calls
-                //    INTERSECT (not union), so clip+draw PER PATH - stacking
-                //    clips for disjoint blobs would reduce the region to
-                //    ~empty and erase the mesh (reviewer 2, New Bug 1).
-                //    Only genuinely-closed paths may clip: an open path's
-                //    clip FILL uses the implicit closing chord, which would
-                //    erase mesh outside the chord (New Bug 3).
+                // Stage 3E: stroke FIRST, then the tinted mask (clipped to
+                // closed+sane paths) ON TOP. The mask now covers the stroke's
+                // inner half and flushes against its outer half - the ~2.5px
+                // untinted band outside the line is gone; the line reads as
+                // sitting exactly ON the boundary.
+                linePaint.color = DetectionStyle.vibrantFor(classColor)
+                linePaint.alpha = 255
+                for (p in paths) canvas.drawPath(p, linePaint)
+
+                // Mask on top: successive clipPath calls INTERSECT (not
+                // union), so clip+draw PER PATH - stacking clips for disjoint
+                // blobs would reduce the region to ~empty (reviewer 2, NB1).
+                // Only genuinely-closed paths may clip: an open path's clip
+                // FILL uses the implicit closing chord (reviewer 2, NB3).
                 val sane = paths.filterIndexed { idx, p ->
                     closedFlags.getOrNull(idx) == true && isSaneClipPath(p, maskRect)
                 }
                 if (sane.isEmpty()) {
-                    drawTintedMask(canvas, mask, maskRect, classColor)
+                    if (paths.isEmpty()) {
+                        // Outline off or no paths: plain full mask.
+                        drawTintedMask(canvas, mask, maskRect, classColor)
+                    } else {
+                        // Paths exist but none sane/closed: draw the mask
+                        // unclipped so the mesh is never erased - and keep a
+                        // visible line by re-stroking on top (muted inner half
+                        // would otherwise read as a faded line).
+                        for (p in paths) canvas.drawPath(p, linePaint)
+                    }
                 } else {
                     for (p in sane) {
                         val save = canvas.save()
@@ -585,13 +601,6 @@ class OverlayView @JvmOverloads constructor(
                         drawTintedMask(canvas, mask, maskRect, classColor)
                         canvas.restoreToCount(save)
                     }
-                }
-
-                // 2. Stroke every chain's boundary.
-                if (paths.isNotEmpty()) {
-                    linePaint.color = DetectionStyle.vibrantFor(classColor)
-                    linePaint.alpha = 255
-                    for (p in paths) canvas.drawPath(p, linePaint)
                 }
             }
 
