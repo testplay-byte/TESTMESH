@@ -147,7 +147,8 @@ class OverlayView @JvmOverloads constructor(
                     val chained = chainNearest(raw)
                     // Normalize to 0..1 mask space BEFORE any screen mapping.
                     val norm = chained.map { p ->
-                        (p.first / mask.width) to (p.second / mask.height)
+                        (p.first / mask.width.toFloat()) to
+                            (p.second / mask.height.toFloat())
                     }
                     if (firstOfClass) {
                         dots = emaDots(det.classId, norm)
