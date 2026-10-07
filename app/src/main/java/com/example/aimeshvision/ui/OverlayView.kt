@@ -435,14 +435,24 @@ class OverlayView @JvmOverloads constructor(
                     buildSmoothPath(item.dots, maskRect)
                 } else null
 
-                if (path != null && isSaneClipPath(path, maskRect)) {
+                if (path != null) {
                     // 1. Mesh strictly inside the line: tinted mask clipped to
-                    //    the dot-chained boundary curve. Sanity-checked: a
-                    //    degenerate path (blended instances, tiny blob) must
-                    //    never erase the mesh - it just skips the clip.
+                    //    the dot-chained boundary curve - but ONLY when the
+                    //    path is sane for clipping (nonzero bounds within the
+                    //    mask rect). The STROKE below is drawn whenever the
+                    //    path exists at all: the v10 sane-clip guard
+                    //    accidentally gated the stroke too and calibrated
+                    //    against the whole-frame mask rect, rejecting valid
+                    //    hand outlines (<15% of frame) -> "outline gone".
                     val save = canvas.save()
-                    canvas.clipPath(path)
-                    drawTintedMask(canvas, mask, maskRect, classColor)
+                    if (isSaneClipPath(path, maskRect)) {
+                        canvas.clipPath(path)
+                        drawTintedMask(canvas, mask, maskRect, classColor)
+                    } else {
+                        // Degenerate path: draw the mesh unclipped - the mesh
+                        // must never be erased by a bad clip.
+                        drawTintedMask(canvas, mask, maskRect, classColor)
+                    }
                     canvas.restoreToCount(save)
 
                     // 2. Vibrant, opaque class-color stroke ON the boundary -
@@ -474,19 +484,18 @@ class OverlayView @JvmOverloads constructor(
     private val filterCache = HashMap<Int, android.graphics.ColorFilter>()
 
     /**
-     * A clip path is sane when it covers a meaningful fraction of the mesh
-     * rect: bounds must overlap the mask rect and the overlap must be at
-     * least 15% of the mask area. Guards against degenerate blended paths
-     * erasing the mesh (the "solid mesh / mesh gone" bug).
+     * A clip path is sane when its bounds are real (nonzero) and inside the
+     * mask rect. Calibration vs the path's OWN bounds - not the frame-sized
+     * mask rect (a hand is usually <15% of the frame, which made the v10
+     * check reject every valid outline).
      */
     private fun isSaneClipPath(path: Path, maskRect: RectF): Boolean {
         val b = android.graphics.RectF()
         path.computeBounds(b, true)
-        val overlapW = maxOf(0f, minOf(b.right, maskRect.right) - maxOf(b.left, maskRect.left))
-        val overlapH = maxOf(0f, minOf(b.bottom, maskRect.bottom) - maxOf(b.top, maskRect.top))
-        val overlap = overlapW * overlapH
-        val maskArea = maskRect.width() * maskRect.height()
-        return overlap > 0f && overlap / maskArea > 0.15f
+        if (b.isEmpty || b.width() <= 1f || b.height() <= 1f) return false
+        // Path bounds must sit inside the mask rect (with a small tolerance).
+        return b.left >= maskRect.left - 2f && b.top >= maskRect.top - 2f &&
+            b.right <= maskRect.right + 2f && b.bottom <= maskRect.bottom + 2f
     }
 
     private fun colorFilterFor(color: Int): android.graphics.ColorFilter =

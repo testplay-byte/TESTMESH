@@ -75,8 +75,10 @@ class MainActivity : AppCompatActivity() {
 
     /** True while the settings sheet is open - camera unbinds + inference pauses. */
     @Volatile private var settingsOpen = false
-    private var camera: android.hardware.camera2.CameraDevice? = null
     private var cameraProvider: ProcessCameraProvider? = null
+
+    /** Whether the camera is currently bound (true pause state machine). */
+    @Volatile private var cameraBound = false
     private var currentModelFilename: String? = null
     private val modelLoading = AtomicBoolean(false)
 
@@ -352,6 +354,7 @@ class MainActivity : AppCompatActivity() {
                 provider.bindToLifecycle(
                     this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis,
                 )
+                cameraBound = true
             } catch (e: Exception) {
                 Log.e(TAG, "Camera setup failed", e)
                 updateBadge("CAM ERROR", false, "#EF4444")
@@ -364,6 +367,7 @@ class MainActivity : AppCompatActivity() {
         try { cameraProvider?.unbindAll() } catch (e: Exception) {
             Log.w(TAG, "pauseCamera unbind failed", e)
         }
+        cameraBound = false
     }
 
     /** Re-binds the camera after [pauseCamera]. */
@@ -442,6 +446,9 @@ class MainActivity : AppCompatActivity() {
             imagePagerAdapter.setImages(emptyList())
             overlayView.clear()
             resetStats()
+            // Camera may have been unbound while paused (settings open, model
+            // reload); always guarantee a live binding on resume.
+            if (!cameraBound) resumeCamera()
             updateBadge("LIVE FEED", true, "#4ADE80")
         } else {
             previewView.bitmap?.let { bitmap ->
@@ -619,23 +626,21 @@ class MainActivity : AppCompatActivity() {
         updateDetectedCounts(results)
     }
 
-    /** Static prefix of the details pill: input resolution · model size. */
-    private var detailsPrefix: String = "— · —"
-
     /**
-     * Per-class detected counts in the details pill, e.g.
-     * "512×512 · 11.1 MB · 6 HAND · 0 CAT". Every model class is listed
-     * (0 when none) so the pill doubles as a live census of what the model
-     * sees. Static resolution/size info is kept as the prefix.
+     * Per-class detected counts live ON the class chips (the capability row
+     * on the right), e.g. the HAND chip reads "6 HAND" while six hands are in
+     * frame - "0 HAND" when none. The chip that says what the model can
+     * recognize now also says how many it currently sees.
      */
     private fun updateDetectedCounts(results: List<Detection>) {
         val counts = HashMap<Int, Int>()
         for (d in results) counts[d.classId] = (counts[d.classId] ?: 0) + 1
-        val parts = modelManager.classLabels.mapIndexed { idx, label ->
-            "${counts[idx] ?: 0} ${label.uppercase()}"
+        for (i in 0 until classChipsRow.childCount) {
+            val chip = classChipsRow.getChildAt(i) as? TextView ?: continue
+            val classId = chip.tag as? Int ?: continue
+            val label = modelManager.classLabels.getOrNull(classId) ?: continue
+            chip.text = "${counts[classId] ?: 0} ${label.uppercase()}"
         }
-        tvModelDetails.text = (parts.joinToString(" · ")
-            .let { if (it.isEmpty()) detailsPrefix else "$detailsPrefix · $it" })
     }
 
     private fun resetStats() {
@@ -653,8 +658,7 @@ class MainActivity : AppCompatActivity() {
 
         val res = "${modelManager.inputWidth}×${modelManager.inputHeight}"
         val mb = modelManager.modelFileSizeBytes / (1024f * 1024f)
-        detailsPrefix = "$res · %.1f MB".format(mb)
-        tvModelDetails.text = detailsPrefix
+        tvModelDetails.text = "$res · %.1f MB".format(mb)
 
         buildClassChips()
     }
