@@ -451,16 +451,19 @@ class MainActivity : AppCompatActivity() {
             if (!cameraBound) resumeCamera()
             updateBadge("LIVE FEED", true, "#4ADE80")
         } else {
-            previewView.bitmap?.let { bitmap ->
-                val pagerVisible = imagePager.visibility == View.VISIBLE
-                if (!pagerVisible) {
-                    uploadedBitmaps.clear()
-                    uploadedBitmaps.add(bitmap)
-                    imagePagerAdapter.setImages(uploadedBitmaps)
-                    imagePager.visibility = View.VISIBLE
-                    pageDots.visibility = View.GONE
-                    previewView.visibility = View.INVISIBLE
-                }
+            val pagerVisible = imagePager.visibility == View.VISIBLE
+            if (pagerVisible) {
+                // Already showing a gallery image: keep its detections on
+                // screen - re-inferring the stale camera frame would
+                // overwrite them (reviewer #11).
+                updateBadge("PAUSED", false, "#94A3B8")
+            } else previewView.bitmap?.let { bitmap ->
+                uploadedBitmaps.clear()
+                uploadedBitmaps.add(bitmap)
+                imagePagerAdapter.setImages(uploadedBitmaps)
+                imagePager.visibility = View.VISIBLE
+                pageDots.visibility = View.GONE
+                previewView.visibility = View.INVISIBLE
                 engine.run("pause-infer",
                     task = { modelManager.runInference(bitmap) },
                     onResult = { results ->
@@ -689,6 +692,8 @@ class MainActivity : AppCompatActivity() {
                     cornerRadius = dp6 * 3f
                 }
             }
+            // Tag with the class id so [updateDetectedCounts] can find it.
+            chip.tag = index
             classChipsRow.addView(chip)
             (chip.layoutParams as? LinearLayout.LayoutParams)?.let {
                 it.marginEnd = dp4

@@ -72,13 +72,18 @@ class OverlayView @JvmOverloads constructor(
         // ── temporal smoothing (dot EMA + label anchor) ──────────────────
         private const val SMOOTHING = 0.45f
         private const val MAX_TRACK_DISTANCE = 0.35f // normalized; beyond = re-acquire
+
+        // Instances survive this many setResults() calls without a match
+        // (frame-count grace - wall-clock timeouts broke smoothing on slow
+        // frames).
+        private const val GRACE_FRAMES = 3L
     }
 
     /** A detection with its per-frame geometry precomputed in [setResults]. */
     private class PreparedItem(
         val det: Detection,
-        /** Smoothed chained dots, normalized 0..1 in mask space (null = none). */
-        val dots: List<Pair<Float, Float>>?,
+        /** One outline per chain, normalized 0..1 in mask space (may be empty). */
+        val chains: List<List<Pair<Float, Float>>>,
         /** Smoothed top edge of the silhouette, normalized 0..1 (null = none). */
         val labelAnchorNorm: Float?,
     )
@@ -135,7 +140,7 @@ class OverlayView @JvmOverloads constructor(
         var box: android.graphics.RectF,   // previous frame's bbox (updated on match)
         val classId: Int,
         var track: Track?,
-        var lastSeen: Long,
+        var lastFrame: Long,               // setResults() counter at last match
     )
 
     private val instances = ArrayList<InstanceTrack>()
@@ -173,46 +178,56 @@ class OverlayView @JvmOverloads constructor(
         val items = ArrayList<PreparedItem>(results.size)
         for (det in results) {
             val mask = det.maskBitmap
-            var dots: List<Pair<Float, Float>>? = null
+            var chains: List<List<Pair<Float, Float>>> = emptyList()
             var anchor: Float? = null
 
             if (mask != null) {
                 val raw = extractBorderDots(mask)
                 if (raw != null && raw.size >= 8) {
-                    // EVERY chain renders - hands/blobs are separate outlines.
-                    val chains = chainNearest(raw)
-                    val normChains = chains.map { chain ->
+                    // EVERY chain becomes its own outline (multi-blob masks).
+                    val normChains = chainNearest(raw).map { chain ->
                         chain.map { p ->
                             (p.first / mask.width.toFloat()) to
                                 (p.second / mask.height.toFloat())
                         }
                     }
-                    val inst = assignments[det]
-                    if (inst != null && inst.track != null &&
-                        inst.track!!.points.size == normChains.firstOrNull()?.size
-                    ) {
-                        // Same object as last frame: EMA-smooth the longest chain.
-                        dots = emaDots(inst, normChains.firstOrNull())
-                        anchor = emaAnchor(inst, dots)
-                    } else {
-                        dots = normChains.firstOrNull()
-                        anchor = dots?.minOfOrNull { it.second }
+                    if (normChains.isNotEmpty()) {
+                        // EMA the longest chain against this instance's
+                        // previous points; shorter blobs render raw.
+                        val longest = normChains.maxByOrNull { it.size }!!
+                        val inst = assignments[det]
+                        val smoothed = if (inst?.track != null) {
+                            emaDots(inst, longest) ?: longest
+                        } else longest
+                        anchor = if (inst != null) emaAnchor(inst, smoothed)
+                                 else smoothed.minOfOrNull { it.second }
+                        // Rebuild the chain list with the smoothed longest.
+                        val outChains = ArrayList<List<Pair<Float, Float>>>(normChains.size)
+                        for (c in normChains) {
+                            outChains.add(if (c === longest) smoothed else c)
+                        }
+                        chains = outChains
+                        if (inst != null) {
+                            inst.box = det.boundingBox
+                            inst.lastFrame = frameCounter
+                            inst.track = Track(smoothed.toTypedArray(), anchor)
+                        } else {
+                            instances.add(InstanceTrack(det.boundingBox, det.classId, Track(smoothed.toTypedArray(), anchor), frameCounter))
+                        }
                     }
-                    // Update / create the instance record.
-                    if (inst != null) {
-                        inst.box = det.boundingBox
-                        inst.lastSeen = now
-                        inst.track = Track((dots ?: emptyList()).toTypedArray(), anchor)
-                    } else {
-                        instances.add(InstanceTrack(det.boundingBox, det.classId, Track((dots ?: emptyList()).toTypedArray(), anchor), now))
-                    }
+                } else if (assignments[det] != null) {
+                    // Mask present but extraction failed: keep the instance
+                    // alive so smoothing survives one bad frame.
+                    assignments[det]!!.lastFrame = frameCounter
                 }
             }
-            items.add(PreparedItem(det, dots, anchor))
+            items.add(PreparedItem(det, chains, anchor))
         }
 
-        // Expire instances not seen this frame (2 frames of grace).
-        instances.removeAll { now - it.lastSeen > 200 }
+        // Expire instances not seen for GRACE_FRAMES consecutive setResults
+        // calls (wall-clock timeouts silently disabled smoothing on slow
+        // frames - reviewer issue #6).
+        instances.removeAll { frameCounter - it.lastFrame > GRACE_FRAMES }
         prepared = items
         invalidate()
     }
@@ -225,6 +240,7 @@ class OverlayView @JvmOverloads constructor(
     /** Forgets temporal smoothing state (e.g. when the model changes). */
     fun resetSmoothing() {
         instances.clear()
+        labelCache.clear()
         prepared = emptyList()
         invalidate()
     }
@@ -300,15 +316,20 @@ class OverlayView @JvmOverloads constructor(
                 val gx = cx / DOT_GRID_STEP
                 val gy = cy / DOT_GRID_STEP
 
-                // Collect unused dots in the 8-neighborhood (Chebyshev <= 2).
+                // Collect unused dots in the 8-neighborhood (Chebyshev <= 1:
+                // with STEP=2, max pixel step is ~2.8px - tight enough to
+                // never jump a border gap or cut a thin corner; reviewer #7).
                 var bestIdx = -1
                 var bestScore = Double.MAX_VALUE
-                for (dy in -2..2) {
-                    for (dx in -2..2) {
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
                         if (dx == 0 && dy == 0) continue
-                        val nx = (gx + dx) * DOT_GRID_STEP + DOT_GRID_STEP / 2
-                        val ny = (gy + dy) * DOT_GRID_STEP + DOT_GRID_STEP / 2
-                        val key = (gy + dy).toLong() * (maxGx + 1) + (gx + dx)
+                        val ngx = gx + dx
+                        val ngy = gy + dy
+                        if (ngx < 0 || ngy < 0 || ngx > maxGx || ngy > maxGy) continue
+                        val nx = ngx * DOT_GRID_STEP + DOT_GRID_STEP / 2
+                        val ny = ngy * DOT_GRID_STEP + DOT_GRID_STEP / 2
+                        val key = ngy.toLong() * (maxGx + 1) + ngx
                         val idx = grid[key] ?: continue
                         if (used[idx]) continue
                         if (dots[idx].first != nx || dots[idx].second != ny) continue
@@ -363,16 +384,24 @@ class OverlayView @JvmOverloads constructor(
             return rawIn
         }
 
+        // Chain-level gate: if ANY dot exceeds the distance limit, the chain
+        // shape changed wholesale (re-acquire) - blending per-dot would mix
+        // two frames into a kinked "Frankenstein" outline (reviewer #10).
+        for (i in rawIn.indices) {
+            val px = prev.points[i].first
+            val py = prev.points[i].second
+            val dx = rawIn[i].first - px
+            val dy = rawIn[i].second - py
+            if (sqrt(dx * dx + dy * dy) > MAX_TRACK_DISTANCE) return rawIn
+        }
         val out = ArrayList<Pair<Float, Float>>(rawIn.size)
         for (i in rawIn.indices) {
             val px = prev.points[i].first
             val py = prev.points[i].second
             val nx = rawIn[i].first
             val ny = rawIn[i].second
-            val dist = sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
             out.add(
-                if (dist > MAX_TRACK_DISTANCE) nx to ny   // jump = re-acquire
-                else px + (nx - px) * (1f - SMOOTHING) to
+                px + (nx - px) * (1f - SMOOTHING) to
                     py + (ny - py) * (1f - SMOOTHING)
             )
         }
@@ -431,37 +460,30 @@ class OverlayView @JvmOverloads constructor(
             val mask = det.maskBitmap
             if (mask != null) {
                 val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
-                val path = if (showSmoothOutline && item.dots != null) {
-                    buildSmoothPath(item.dots, maskRect)
-                } else null
 
-                if (path != null) {
-                    // 1. Mesh strictly inside the line: tinted mask clipped to
-                    //    the dot-chained boundary curve - but ONLY when the
-                    //    path is sane for clipping (nonzero bounds within the
-                    //    mask rect). The STROKE below is drawn whenever the
-                    //    path exists at all: the v10 sane-clip guard
-                    //    accidentally gated the stroke too and calibrated
-                    //    against the whole-frame mask rect, rejecting valid
-                    //    hand outlines (<15% of frame) -> "outline gone".
-                    val save = canvas.save()
-                    if (isSaneClipPath(path, maskRect)) {
-                        canvas.clipPath(path)
-                        drawTintedMask(canvas, mask, maskRect, classColor)
-                    } else {
-                        // Degenerate path: draw the mesh unclipped - the mesh
-                        // must never be erased by a bad clip.
-                        drawTintedMask(canvas, mask, maskRect, classColor)
+                // One outline per chain - multi-blob masks stay fully outlined
+                // (reviewer #2: longest-chain-only dropped blobs).
+                val paths = if (showSmoothOutline && item.chains.isNotEmpty()) {
+                    item.chains.mapNotNull { chain ->
+                        if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
                     }
-                    canvas.restoreToCount(save)
+                } else emptyList()
 
-                    // 2. Vibrant, opaque class-color stroke ON the boundary -
-                    //    half on the mesh, half outside it.
+                // 1. Mesh inside the line: clip to the union of all chain
+                //    paths (sanity-checked). With no qualifying path, draw the
+                //    mask unclipped - the mesh must never be erased.
+                val save = canvas.save()
+                for (p in paths) {
+                    if (isSaneClipPath(p, maskRect)) canvas.clipPath(p)
+                }
+                drawTintedMask(canvas, mask, maskRect, classColor)
+                canvas.restoreToCount(save)
+
+                // 2. Stroke every chain's boundary.
+                if (paths.isNotEmpty()) {
                     linePaint.color = DetectionStyle.vibrantFor(classColor)
                     linePaint.alpha = 255
-                    canvas.drawPath(path, linePaint)
-                } else {
-                    drawTintedMask(canvas, mask, maskRect, classColor)
+                    for (p in paths) canvas.drawPath(p, linePaint)
                 }
             }
 
@@ -529,8 +551,15 @@ class OverlayView @JvmOverloads constructor(
             pts[i * 2 + 1] = maskRect.top + dots[i].second * maskRect.height()
         }
 
+        // Closure test: last dot within ~2 grid steps of the first - closing
+        // an OPEN chain would draw a straight cut across the mesh (reviewer #3).
+        val gapX = (dots[0].first - dots[n - 1].first) * maskRect.width()
+        val gapY = (dots[0].second - dots[n - 1].second) * maskRect.height()
+        val closes = (gapX * gapX + gapY * gapY) < 64f
+
         val mids = FloatArray(n * 2)
-        for (i in 0 until n) {
+        val segs = if (closes) n else n - 1
+        for (i in 0 until segs) {
             val j = (i + 1) % n
             mids[i * 2] = (pts[i * 2] + pts[j * 2]) / 2f
             mids[i * 2 + 1] = (pts[i * 2 + 1] + pts[j * 2 + 1]) / 2f
@@ -538,14 +567,14 @@ class OverlayView @JvmOverloads constructor(
 
         val path = Path()
         path.moveTo(mids[0], mids[1])
-        for (i in 0 until n) {
+        for (i in 0 until segs) {
             val j = (i + 1) % n
             path.quadTo(
                 pts[j * 2], pts[j * 2 + 1],      // control = real border dot
-                mids[j * 2], mids[j * 2 + 1],    // anchor   = midpoint
+                mids[i * 2], mids[i * 2 + 1],    // anchor   = midpoint
             )
         }
-        path.close()
+        if (closes) path.close()
         return path
     }
 

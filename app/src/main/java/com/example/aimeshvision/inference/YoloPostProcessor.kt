@@ -224,10 +224,10 @@ class YoloPostProcessor(
         protoBuffer.rewind()
         protoBuffer.asFloatBuffer().get(protoData)
 
-        // PERF: one scratch array reused across detections instead of a fresh
-        // IntArray per detection (contents are fully overwritten each pass -
-        // row stride is written with 0 or 0xFFFFFFFF, never left stale, so the
-        // output is identical to per-detection allocation).
+        // PERF: one scratch array reused across detections. It MUST be zeroed
+        // per detection: the write loop covers only the bbox area, and stale
+        // 0xFFFFFFFF pixels from a previous detection would bleed into this
+        // detection's bitmap (reviewer-found contamination bug).
         val pixels = IntArray(usableProtoW * usableProtoH)
 
         for (det in detections) {
@@ -235,6 +235,7 @@ class YoloPostProcessor(
                 val coeffs = det.maskCoefficients ?: continue
                 if (coeffs.size != protoC) continue
 
+                java.util.Arrays.fill(pixels, 0)
                 val mask = Bitmap.createBitmap(usableProtoW, usableProtoH, Bitmap.Config.ARGB_8888)
 
                 val boxL = (det.boundingBox.left * usableProtoW).toInt().coerceIn(0, usableProtoW - 1)
