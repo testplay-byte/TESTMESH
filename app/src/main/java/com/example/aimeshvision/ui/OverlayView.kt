@@ -408,7 +408,21 @@ class OverlayView @JvmOverloads constructor(
             tryChain(start)?.let { chains.add(it) }
         }
 
-        // Longest chain = the object's main outline.
+        // Stage 3F: canonical winding - reverse chains whose signed area is
+        // negative so every closed chain walks the same direction no matter
+        // which way the greedy walk happened to go. Without this, a direction
+        // flip between frames keeps the chain LENGTH intact (EMA engages) but
+        // blends dot i with its spatially opposite counterpart.
+        for (i in chains.indices) {
+            val c = chains[i]
+            var area2 = 0.0
+            for (j in c.indices) {
+                val a = c[j]
+                val b = c[(j + 1) % c.size]
+                area2 += a.first.toDouble() * b.second - b.first.toDouble() * a.second
+            }
+            if (area2 < 0) chains[i] = c.reversed()
+        }
         return chains.sortedByDescending { it.size }
     }
 
