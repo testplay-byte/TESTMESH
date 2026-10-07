@@ -423,7 +423,7 @@ class OverlayView @JvmOverloads constructor(
                         val key = ngy.toLong() * (maxGx + 1) + ngx
                         val cellDots = grid[key] ?: continue
                         for (idx in cellDots) {
-                            if (used[idx] || idx == startIdx && chain.size == 1) continue
+                            if (used[idx]) continue
                             // Same-cell dots (subpixel stacking) must remain
                             // connectable: score by the ACTUAL pixel delta,
                             // not the cell offset (verification-round fix).
