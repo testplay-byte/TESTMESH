@@ -616,6 +616,26 @@ class MainActivity : AppCompatActivity() {
         if (results.isEmpty()) tvConfidence.text = "---"
         else tvConfidence.text = "${(results.maxOf { it.confidence } * 100).toInt()}%"
         tvLatency.text = "${latencyMs}ms"
+        updateDetectedCounts(results)
+    }
+
+    /** Static prefix of the details pill: input resolution · model size. */
+    private var detailsPrefix: String = "— · —"
+
+    /**
+     * Per-class detected counts in the details pill, e.g.
+     * "512×512 · 11.1 MB · 6 HAND · 0 CAT". Every model class is listed
+     * (0 when none) so the pill doubles as a live census of what the model
+     * sees. Static resolution/size info is kept as the prefix.
+     */
+    private fun updateDetectedCounts(results: List<Detection>) {
+        val counts = HashMap<Int, Int>()
+        for (d in results) counts[d.classId] = (counts[d.classId] ?: 0) + 1
+        val parts = modelManager.classLabels.mapIndexed { idx, label ->
+            "${counts[idx] ?: 0} ${label.uppercase()}"
+        }
+        tvModelDetails.text = (parts.joinToString(" · ")
+            .let { if (it.isEmpty()) detailsPrefix else "$detailsPrefix · $it" })
     }
 
     private fun resetStats() {
@@ -633,7 +653,8 @@ class MainActivity : AppCompatActivity() {
 
         val res = "${modelManager.inputWidth}×${modelManager.inputHeight}"
         val mb = modelManager.modelFileSizeBytes / (1024f * 1024f)
-        tvModelDetails.text = "$res · %.1f MB".format(mb)
+        detailsPrefix = "$res · %.1f MB".format(mb)
+        tvModelDetails.text = detailsPrefix
 
         buildClassChips()
     }

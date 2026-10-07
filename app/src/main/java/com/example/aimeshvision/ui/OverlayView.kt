@@ -120,20 +120,56 @@ class OverlayView @JvmOverloads constructor(
     var showBoxes: Boolean = true
     var showSmoothOutline: Boolean = false
 
-    // ── temporal state (per class id; first detection of a class drives it) ──
+    // ── temporal state (per DETECTION INSTANCE, matched by IoU) ──────────────
+    // Per-class tracks were the root cause of the six-hands bug: two hands of
+    // the same class shared one track, so their dots blended into a single
+    // outline (and the clip built from it ate the mesh). Instances are now
+    // matched to the previous frame by bounding-box IoU and smoothed per
+    // instance; unmatched detections render raw.
     private class Track(
         val points: Array<Pair<Float, Float>>,
         var labelAnchor: Float?,
     )
 
-    private val tracks = mutableMapOf<Int, Track>()
+    private class InstanceTrack(
+        var box: android.graphics.RectF,   // previous frame's bbox (updated on match)
+        val classId: Int,
+        var track: Track?,
+        var lastSeen: Long,
+    )
+
+    private val instances = ArrayList<InstanceTrack>()
+    private var frameCounter = 0L
 
     /** Called once per inference result: precomputes geometry, then redraws. */
     fun setResults(results: List<Detection>, inputWidth: Int, inputHeight: Int) {
         sourceImageWidth = inputWidth
         sourceImageHeight = inputHeight
 
-        val seenClasses = mutableSetOf<Int>()
+        frameCounter++
+        val now = System.currentTimeMillis()
+
+        // Match current detections to previous-frame instances by IoU.
+        val matched = BooleanArray(instances.size)
+        val assignments = HashMap<Detection, InstanceTrack?>(results.size)
+        for (det in results) {
+            var bestIdx = -1
+            var bestIou = 0.25f   // below this = not the same object
+            for (i in instances.indices) {
+                if (matched[i]) continue
+                val inst = instances[i]
+                if (inst.classId != det.classId) continue
+                val iou = iouOf(inst.box, det.boundingBox)
+                if (iou > bestIou) { bestIou = iou; bestIdx = i }
+            }
+            if (bestIdx >= 0) {
+                matched[bestIdx] = true
+                assignments[det] = instances[bestIdx]
+            } else {
+                assignments[det] = null
+            }
+        }
+
         val items = ArrayList<PreparedItem>(results.size)
         for (det in results) {
             val mask = det.maskBitmap
@@ -141,29 +177,42 @@ class OverlayView @JvmOverloads constructor(
             var anchor: Float? = null
 
             if (mask != null) {
-                val firstOfClass = seenClasses.add(det.classId)
                 val raw = extractBorderDots(mask)
                 if (raw != null && raw.size >= 8) {
-                    // The longest local chain is the object's main outline.
-                    val chained = chainNearest(raw).firstOrNull()
-                    if (chained != null) {
-                        // Normalize to 0..1 mask space BEFORE any screen mapping.
-                        val norm = chained.map { p ->
+                    // EVERY chain renders - hands/blobs are separate outlines.
+                    val chains = chainNearest(raw)
+                    val normChains = chains.map { chain ->
+                        chain.map { p ->
                             (p.first / mask.width.toFloat()) to
                                 (p.second / mask.height.toFloat())
                         }
-                        if (firstOfClass) {
-                            dots = emaDots(det.classId, norm)
-                            anchor = emaAnchor(det.classId, dots)
-                        } else {
-                            dots = norm
-                            anchor = norm.minOfOrNull { it.second }
-                        }
+                    }
+                    val inst = assignments[det]
+                    if (inst != null && inst.track != null &&
+                        inst.track!!.points.size == normChains.firstOrNull()?.size
+                    ) {
+                        // Same object as last frame: EMA-smooth the longest chain.
+                        dots = emaDots(inst, normChains.firstOrNull())
+                        anchor = emaAnchor(inst, dots)
+                    } else {
+                        dots = normChains.firstOrNull()
+                        anchor = dots?.minOfOrNull { it.second }
+                    }
+                    // Update / create the instance record.
+                    if (inst != null) {
+                        inst.box = det.boundingBox
+                        inst.lastSeen = now
+                        inst.track = Track((dots ?: emptyList()).toTypedArray(), anchor)
+                    } else {
+                        instances.add(InstanceTrack(det.boundingBox, det.classId, Track((dots ?: emptyList()).toTypedArray(), anchor), now))
                     }
                 }
             }
             items.add(PreparedItem(det, dots, anchor))
         }
+
+        // Expire instances not seen this frame (2 frames of grace).
+        instances.removeAll { now - it.lastSeen > 200 }
         prepared = items
         invalidate()
     }
@@ -175,7 +224,7 @@ class OverlayView @JvmOverloads constructor(
 
     /** Forgets temporal smoothing state (e.g. when the model changes). */
     fun resetSmoothing() {
-        tracks.clear()
+        instances.clear()
         prepared = emptyList()
         invalidate()
     }
@@ -306,11 +355,11 @@ class OverlayView @JvmOverloads constructor(
      * stable frame to frame; a size change falls back to the raw chain.
      */
     private fun emaDots(
-        classId: Int, rawIn: List<Pair<Float, Float>>,
-    ): List<Pair<Float, Float>> {
-        val prev = tracks[classId]
+        inst: InstanceTrack, rawIn: List<Pair<Float, Float>>?,
+    ): List<Pair<Float, Float>>? {
+        rawIn ?: return null
+        val prev = inst.track
         if (prev == null || prev.points.size != rawIn.size) {
-            tracks[classId] = Track(rawIn.toTypedArray(), prev?.labelAnchor)
             return rawIn
         }
 
@@ -327,21 +376,31 @@ class OverlayView @JvmOverloads constructor(
                     py + (ny - py) * (1f - SMOOTHING)
             )
         }
-        tracks[classId] = Track(out.toTypedArray(), prev.labelAnchor)
         return out
     }
 
     /** EMA-blends the label anchor (top edge Y, normalized) across frames. */
-    private fun emaAnchor(classId: Int, dots: List<Pair<Float, Float>>?): Float? {
+    private fun emaAnchor(inst: InstanceTrack, dots: List<Pair<Float, Float>>?): Float? {
         val raw = dots?.minOfOrNull { it.second } ?: return null
-        val prev = tracks[classId]?.labelAnchor
+        val prev = inst.track?.labelAnchor
         val smoothed = if (prev == null || abs(raw - prev) > MAX_TRACK_DISTANCE) {
             raw
         } else {
             prev + (raw - prev) * (1f - SMOOTHING)
         }
-        tracks[classId]?.labelAnchor = smoothed
         return smoothed
+    }
+
+    /** IoU of two normalized bounding boxes (instance matching). */
+    private fun iouOf(a: android.graphics.RectF, b: android.graphics.RectF): Float {
+        val left = maxOf(a.left, b.left)
+        val top = maxOf(a.top, b.top)
+        val right = minOf(a.right, b.right)
+        val bottom = minOf(a.bottom, b.bottom)
+        val inter = maxOf(0f, right - left) * maxOf(0f, bottom - top)
+        val union = (a.right - a.left) * (a.bottom - a.top) +
+            (b.right - b.left) * (b.bottom - b.top) - inter
+        return if (union <= 0f) 0f else inter / union
     }
 
     // ── drawing (cached geometry only) ────────────────────────────────────────
@@ -376,9 +435,11 @@ class OverlayView @JvmOverloads constructor(
                     buildSmoothPath(item.dots, maskRect)
                 } else null
 
-                if (path != null) {
+                if (path != null && isSaneClipPath(path, maskRect)) {
                     // 1. Mesh strictly inside the line: tinted mask clipped to
-                    //    the dot-chained boundary curve.
+                    //    the dot-chained boundary curve. Sanity-checked: a
+                    //    degenerate path (blended instances, tiny blob) must
+                    //    never erase the mesh - it just skips the clip.
                     val save = canvas.save()
                     canvas.clipPath(path)
                     drawTintedMask(canvas, mask, maskRect, classColor)
@@ -411,6 +472,22 @@ class OverlayView @JvmOverloads constructor(
     }
 
     private val filterCache = HashMap<Int, android.graphics.ColorFilter>()
+
+    /**
+     * A clip path is sane when it covers a meaningful fraction of the mesh
+     * rect: bounds must overlap the mask rect and the overlap must be at
+     * least 15% of the mask area. Guards against degenerate blended paths
+     * erasing the mesh (the "solid mesh / mesh gone" bug).
+     */
+    private fun isSaneClipPath(path: Path, maskRect: RectF): Boolean {
+        val b = android.graphics.RectF()
+        path.computeBounds(b, true)
+        val overlapW = maxOf(0f, minOf(b.right, maskRect.right) - maxOf(b.left, maskRect.left))
+        val overlapH = maxOf(0f, minOf(b.bottom, maskRect.bottom) - maxOf(b.top, maskRect.top))
+        val overlap = overlapW * overlapH
+        val maskArea = maskRect.width() * maskRect.height()
+        return overlap > 0f && overlap / maskArea > 0.15f
+    }
 
     private fun colorFilterFor(color: Int): android.graphics.ColorFilter =
         filterCache.getOrPut(color) { PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN) }
