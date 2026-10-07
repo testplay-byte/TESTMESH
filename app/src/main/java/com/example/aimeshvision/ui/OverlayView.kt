@@ -256,7 +256,7 @@ class OverlayView @JvmOverloads constructor(
      * cannot "fail to trace" like a walking tracer; if the mesh exists its
      * dots exist. Returns null only when the mask is empty.
      */
-    private fun extractBorderDots(mask: Bitmap): List<Pair<Int, Int>>? {
+    private fun extractBorderDots(mask: Bitmap): List<Pair<Float, Float>>? {
         val w = mask.width
         val h = mask.height
         if (w < 4 || h < 4) return null
@@ -266,7 +266,42 @@ class OverlayView @JvmOverloads constructor(
         fun solid(x: Int, y: Int): Boolean =
             x in 0 until w && y in 0 until h && (px[y * w + x] ushr 24) > 128
 
-        val dots = ArrayList<Pair<Int, Int>>(512)
+        // Stage 1B (subpixel): the alpha byte near the boundary is a local
+        // linearization of sigmoid (alpha ≈ 128 + 64*sum, decode-side), so
+        // the 0.5-level crossing between a solid pixel (alpha aS) and its
+        // background neighbor (alpha aN) sits at t = (aS-128)/(aS-aN) along
+        // that edge. Lerping the dot there removes the 1px quantization of
+        // the old integer dots - corners land at their true positions.
+        fun alpha(x: Int, y: Int): Int =
+            if (x in 0 until w && y in 0 until h) (px[y * w + x] ushr 24) else 0
+
+        fun subpixel(sx: Int, sy: Int): Pair<Float, Float> {
+            val aS = alpha(sx, sy).toFloat()
+            // Neighbors: pick the background one with the strongest gradient.
+            var bestT = 0.5f
+            var bestDx = 0f
+            var bestDy = 0f
+            val cands = listOf(sx - 1 to sy, sx + 1 to sy, sx to sy - 1, sx to sy + 1)
+            for ((nx, ny) in cands) {
+                val aN = alpha(nx, ny).toFloat()
+                if (aN >= 128f) continue
+                val denom = aS - aN
+                if (denom < 1f) continue
+                val t = ((aS - 128f) / denom).coerceIn(0f, 1f)
+                if (t > bestT || bestDx == 0f && bestDy == 0f) {
+                    // keep the candidate giving the farthest crossing from
+                    // the solid center (most informative edge)
+                    if (t >= bestT || bestDx == 0f && bestDy == 0f) {
+                        bestT = t
+                        bestDx = (nx - sx).toFloat()
+                        bestDy = (ny - sy).toFloat()
+                    }
+                }
+            }
+            return (sx + bestDx * (1f - bestT)) to (sy + bestDy * (1f - bestT))
+        }
+
+        val dots = ArrayList<Pair<Float, Float>>(512)
         var sy = DOT_GRID_STEP / 2
         while (sy < h) {
             var sx = DOT_GRID_STEP / 2
@@ -275,7 +310,7 @@ class OverlayView @JvmOverloads constructor(
                     (!solid(sx - 1, sy) || !solid(sx + 1, sy) ||
                         !solid(sx, sy - 1) || !solid(sx, sy + 1))
                 ) {
-                    dots.add(sx to sy)
+                    dots.add(subpixel(sx, sy))
                 }
                 sx += DOT_GRID_STEP
             }
@@ -292,36 +327,44 @@ class OverlayView @JvmOverloads constructor(
      * across the shape - if no adjacent dot is free, the walk ends (or starts
      * a new chain elsewhere) rather than forcing a long connection.
      */
-    private fun chainNearest(dots: List<Pair<Int, Int>>): List<List<Pair<Int, Int>>> {
+    private fun chainNearest(dots: List<Pair<Float, Float>>): List<List<Pair<Float, Float>>> {
         if (dots.size < 3) return emptyList()
 
-        // Grid lookup: dot at (gx, gy) -> index. Chebyshev neighbor searches
-        // become O(1) instead of O(n) per step.
-        val maxGx = dots.maxOf { it.first } / DOT_GRID_STEP
-        val maxGy = dots.maxOf { it.second } / DOT_GRID_STEP
+        // Grid lookup: dot hashed by its ROUNDED integer cell (subpixel dots
+        // keep float positions; the cell is only for O(1) neighbor search).
+        // No two dots share a cell (extraction grid is unique per cell).
+        fun cell(x: Float, y: Float): Long =
+            (Math.round(y / DOT_GRID_STEP).toLong() shl 21) + Math.round(x / DOT_GRID_STEP)
+        val maxGx = dots.maxOf { Math.round(it.first / DOT_GRID_STEP) }
+        val maxGy = dots.maxOf { Math.round(it.second / DOT_GRID_STEP) }
         val grid = HashMap<Long, Int>(dots.size * 2)
-        dots.forEachIndexed { idx, (x, y) -> grid[(y / DOT_GRID_STEP).toLong() * (maxGx + 1) + (x / DOT_GRID_STEP)] = idx }
+        dots.forEachIndexed { idx, (x, y) ->
+            val cx = Math.round(x / DOT_GRID_STEP)
+            val cy = Math.round(y / DOT_GRID_STEP)
+            if (cx in 0..maxGx && cy in 0..maxGy) grid[cy.toLong() * (maxGx + 1) + cx] = idx
+        }
 
         val used = BooleanArray(dots.size)
-        val chains = ArrayList<List<Pair<Int, Int>>>()
+        val chains = ArrayList<List<Pair<Float, Float>>>()
 
-        fun tryChain(startIdx: Int): List<Pair<Int, Int>>? {
-            val chain = ArrayList<Pair<Int, Int>>()
+        fun tryChain(startIdx: Int): List<Pair<Float, Float>>? {
+            val chain = ArrayList<Pair<Float, Float>>()
             var cur = startIdx
             used[cur] = true
             chain.add(dots[cur])
             // Walk direction from the previous step (0,0 at the first step).
-            var dirX = 0
-            var dirY = 0
+            var dirX = 0f
+            var dirY = 0f
             while (true) {
                 val cx = dots[cur].first
                 val cy = dots[cur].second
-                val gx = cx / DOT_GRID_STEP
-                val gy = cy / DOT_GRID_STEP
+                val gx = Math.round(cx / DOT_GRID_STEP)
+                val gy = Math.round(cy / DOT_GRID_STEP)
 
                 // Collect unused dots in the 8-neighborhood (Chebyshev <= 1:
                 // with STEP=2, max pixel step is ~2.8px - tight enough to
                 // never jump a border gap or cut a thin corner; reviewer #7).
+                // Subpixel dots: the candidate's cell must match (gx+dx, gy+dy).
                 var bestIdx = -1
                 var bestScore = Double.MAX_VALUE
                 for (dy in -1..1) {
@@ -330,12 +373,9 @@ class OverlayView @JvmOverloads constructor(
                         val ngx = gx + dx
                         val ngy = gy + dy
                         if (ngx < 0 || ngy < 0 || ngx > maxGx || ngy > maxGy) continue
-                        val nx = ngx * DOT_GRID_STEP + DOT_GRID_STEP / 2
-                        val ny = ngy * DOT_GRID_STEP + DOT_GRID_STEP / 2
                         val key = ngy.toLong() * (maxGx + 1) + ngx
                         val idx = grid[key] ?: continue
                         if (used[idx]) continue
-                        if (dots[idx].first != nx || dots[idx].second != ny) continue
                         val step = sqrt((dx * dx + dy * dy).toDouble())
                         // Prefer continuing in the current direction (straighter
                         // border walk) with distance as the tiebreaker.
@@ -367,6 +407,7 @@ class OverlayView @JvmOverloads constructor(
             if (start < 0) break
             tryChain(start)?.let { chains.add(it) }
         }
+
         // Longest chain = the object's main outline.
         return chains.sortedByDescending { it.size }
     }

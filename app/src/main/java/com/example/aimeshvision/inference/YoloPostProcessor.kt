@@ -278,7 +278,15 @@ class YoloPostProcessor(
                         // PERF: sigmoid(sum) > 0.5 is mathematically identical
                         // to sum > 0 - the exp() call (per pixel per detection,
                         // the hottest line in the pipeline) is skipped entirely.
-                        if (sum > 0f) pixels[y * usableProtoW + x] = 0xFFFFFFFF.toInt()
+                        // Stage 1B (subpixel outline): the alpha byte carries a
+                        // local linearization of sigmoid, alpha ≈ 128 + 64*sum
+                        // (sigmoid(x) ≈ 0.5 + x/4 near the crossing - the only
+                        // place the value matters). Border dots later lerp to
+                        // the true 0.5-level crossing between pixels.
+                        if (sum > 0f) {
+                            val a = (128 + sum * 64).toInt().coerceIn(129, 255)
+                            pixels[y * usableProtoW + x] = (a shl 24) or 0x00FFFFFF
+                        }
                     }
                 }
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)
