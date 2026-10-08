@@ -41,24 +41,26 @@ class YoloPostProcessor(
         private const val MESH_ALPHA_CUTOFF = 104
 
         // ── IMAGE-SPACE OUTLINE BAND (outline redesign) ─────────────────────
-        // The outline is not vector geometry: it is a per-texel ALPHA RAMP
-        // harvested from the SAME blurred field the mesh is drawn from, in
-        // the zone immediately OUTSIDE the visible silhouette - texels whose
-        // blurred alpha sits in [RING_LOW_ALPHA, MESH_ALPHA_CUTOFF) get a
-        // bright ramp (0 at RING_LOW_ALPHA, 255 at the mesh edge). One
-        // threshold serves both layers: the band's inner edge and the mesh's
-        // outer edge are the SAME level set, so they meet with no gap, no
-        // overlap and no possibility of double lines. RING_LOW_ALPHA is the
-        // band's outer floor: the blur's exterior feather runs ~0-85 alpha
-        // for confident objects but only ~0-43 at soft/low-confidence edges
-        // - 40 keeps the outline present at soft edges too (a 60 floor left
-        // gaps there). The ramp is doubled and clamped so confident edges
-        // reach FULL brightness while the tail still fades smoothly to 0 at
-        // the floor (no hard outer step). Widening beyond the feather would
-        // need one extra blur pass on the band array (reserved knob; the
-        // feather is ~1-2 texels = 8-16 screen px today).
-        private const val RING_LOW_ALPHA = 40
-        private const val RING_SPAN = MESH_ALPHA_CUTOFF - RING_LOW_ALPHA
+        // The outline is not vector geometry: it is a per-texel alpha ramp
+        // over the DISTANCE TO THE MESH BOUNDARY (3-4 chamfer transform of
+        // the thresholded mask), straddling the silhouette edge:
+        //
+        //   - outer ramp: alpha 255 at the boundary texel, fading to 0 over
+        //     RING_OUT_TEXELS (~16 screen px per texel at phone scale);
+        //   - inner ramp: alpha 255 ON the boundary texel(s), fading to 0
+        //     over RING_IN_TEXELS - the line sits ON the mesh edge/corners
+        //     (half in, half out) instead of floating outside it.
+        //
+        // Distance-based (NOT harvested from the blur's exterior feather as
+        // the first attempt was): the separable box blur only spreads along
+        // axes, so its feather DIES at corners and diagonal edges - that is
+        // exactly the "outline looks dotted / misses the corners" device
+        // report. A chamfer distance ramp covers every texel within range by
+        // construction: solid around corners, no threshold gaps.
+        // One boundary definition still serves both layers (band peaks AT the
+        // mesh's own level set), so double lines remain unrepresentable.
+        private const val RING_OUT_TEXELS = 2f
+        private const val RING_IN_TEXELS = 1f
 
         // SPECKLE FILTER (moved here from OverlayView so it applies whether
         // or not the outline is drawn - previously speckles tinted the frame
@@ -278,8 +280,11 @@ class YoloPostProcessor(
         val pixels = IntArray(usableProtoW * usableProtoH)
         // Scratch for the mesh smoothing filter (alpha-only blur passes).
         val blurTmp = IntArray(usableProtoW * usableProtoH)
-        // Scratch for the outline band (same size; zeroed per detection).
+        // Scratch for the outline band (zeroed per detection) + the two
+        // chamfer distance fields it is computed from.
         val ring = IntArray(usableProtoW * usableProtoH)
+        val distOut = IntArray(usableProtoW * usableProtoH)
+        val distIn = IntArray(usableProtoW * usableProtoH)
         // Scratch for the speckle filter (flood fill: stack + seen + component).
         val floodStack = IntArray(usableProtoW * usableProtoH)
         val floodSeen = BooleanArray(usableProtoW * usableProtoH)
@@ -343,21 +348,26 @@ class YoloPostProcessor(
                     }
                 }
 
-                // Smoothing filter (ONE separable 3x3 pass) + OUTLINE BAND
-                // harvest: the V-pass computes the final blurred alpha and,
-                // for full-frame decodes, writes the band ramp for texels in
-                // [RING_LOW_ALPHA, cutoff) - the zone just outside the mesh.
-                // Bbox-only decodes (tail of a crowded scene) skip the band:
-                // their mask is cut at the box edge and a band there would
-                // draw straight lines along that artificial cut.
+                // 1) Smoothing filter (ONE separable 3x3 pass): anti-aliased
+                //    mesh edge; threshold at the cutoff = the mesh silhouette.
+                // 2) Speckle erasure (mask only): tiny noise blobs must not
+                //    tint anything (works with the outline OFF too), and the
+                //    band below derives from the cleaned mesh, so erased
+                //    speckles never grow an outline.
+                // 3) OUTLINE BAND (full-frame decodes only): distance ramp
+                //    around the final silhouette. Bbox-only decodes (tail of
+                //    a crowded scene) skip it - their mask is cut at the box
+                //    edge and a band there would outline that artificial cut.
                 val fullDecode = detIdx < fullDecodeCount
-                smoothMaskAlpha(pixels, ring, blurTmp, usableProtoW,
-                    usableProtoH, fullDecode)
+                smoothMaskAlpha(pixels, blurTmp, usableProtoW, usableProtoH)
 
-                // Speckle erasure (mask + band): tiny noise blobs must not
-                // tint or outline anything (works with the outline OFF too).
-                removeSpeckles(pixels, ring, usableProtoW, usableProtoH,
+                removeSpeckles(pixels, usableProtoW, usableProtoH,
                     floodStack, floodSeen, floodComp)
+
+                if (fullDecode) {
+                    buildOutlineBand(pixels, ring, usableProtoW,
+                        usableProtoH, distOut, distIn)
+                }
 
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)
                 det.maskBitmap = mask
@@ -386,25 +396,21 @@ class YoloPostProcessor(
     }
 
     /**
-     * Mesh smoothing filter + outline band harvest: ONE separable 3x3
-     * box-blur pass over the alpha bytes of [pix] (white RGB preserved).
-     * Smooths the proto-grid staircase at the source, so the tinted mesh
-     * edge arrives anti-aliased. Exactly one pass - a second would erode
-     * sub-3px features and merge 1px gaps (measured on a byte-exact port).
-     *
-     * The V-pass writes two outputs from the SAME final blurred value:
-     *  - [pix]: the mesh (alpha >= [MESH_ALPHA_CUTOFF], else 0);
-     *  - [ring]: the outline band when [writeRing] - a bright ramp for
-     *    alpha in [RING_LOW_ALPHA, cutoff), brightest AT the mesh edge and
-     *    fading outward. Both layers therefore share one threshold: band
-     *    inner edge == mesh outer edge, gap-free and double-line-free by
-     *    construction (the outline redesign).
+     * Mesh smoothing filter: ONE separable 3x3 box-blur pass over the alpha
+     * bytes of [pix] (white RGB preserved). Smooths the proto-grid staircase
+     * at the source, so the tinted mesh edge arrives anti-aliased. Exactly
+     * one pass - a second would erode sub-3px features and merge 1px gaps
+     * (measured on a byte-exact port). The V-pass applies the spill cutoff:
+     * final alpha >= [MESH_ALPHA_CUTOFF] keeps its value, everything else is
+     * zeroed - the mesh silhouette is exactly the cutoff level set, and the
+     * outline band is derived from that silhouette afterwards (see
+     * [buildOutlineBand]; both layers share ONE boundary definition).
      *
      * Uses [tmp] as row-pass scratch (same length as [pix], fully rewritten
      * each pass, so stale contents are never read).
      */
-    private fun smoothMaskAlpha(pix: IntArray, ring: IntArray, tmp: IntArray,
-        w: Int, h: Int, writeRing: Boolean) {
+    private fun smoothMaskAlpha(pix: IntArray, tmp: IntArray,
+        w: Int, h: Int) {
         // Horizontal pass: pix -> tmp (edge pixels duplicate the neighbor).
         for (y in 0 until h) {
             val r = y * w
@@ -417,11 +423,8 @@ class YoloPostProcessor(
                 a0 = a1
             }
         }
-        // Vertical pass: tmp -> pix. Values below MESH_ALPHA_CUTOFF are
-        // outside-feather (max 85 after one pass) - zeroed from the mesh
-        // (snaps the tint edge to the object boundary) AND harvested into
-        // the outline band while they last (the zone is 1-2 texels wide, so
-        // the band is a ~8-16 screen px soft border hugging the mesh).
+        // Vertical pass: tmp -> pix, with the spill cutoff (snaps the tint
+        // edge back to the object boundary - see doc above).
         for (x in 0 until w) {
             var a0 = tmp[x] ushr 24
             for (y in 0 until h) {
@@ -429,34 +432,122 @@ class YoloPostProcessor(
                 val a1 = tmp[i] ushr 24
                 val a2 = if (y + 1 < h) tmp[(y + 1) * w + x] ushr 24 else a1
                 val av = (a0 + a1 + a2) / 3
-                if (av >= MESH_ALPHA_CUTOFF) {
-                    pix[i] = (av shl 24) or 0x00FFFFFF
-                } else {
-                    pix[i] = 0
-                    if (writeRing && av >= RING_LOW_ALPHA) {
-                        // Ramp: 0 at the feather's outer floor -> 255 at
-                        // av = LOW + SPAN/2 (a typical confident edge sits
-                        // there), clamped - bright line, soft outer tail.
-                        val ra = ((av - RING_LOW_ALPHA) * 510 / RING_SPAN)
-                            .coerceIn(0, 255)
-                        ring[i] = (ra shl 24) or 0x00FFFFFF
-                    }
-                }
+                pix[i] = if (av >= MESH_ALPHA_CUTOFF) (av shl 24) or 0x00FFFFFF else 0
                 a0 = a1
             }
         }
     }
 
     /**
+     * Builds the outline band around the mesh silhouette in [pix] (alpha >=
+     * [MESH_ALPHA_CUTOFF] = solid): a 3-4 chamfer distance transform from
+     * the boundary on BOTH sides, converted to an alpha ramp that peaks AT
+     * the boundary and fades over [RING_OUT_TEXELS] outward /
+     * [RING_IN_TEXELS] inward.
+     *
+     * Distance-based rather than feather-based because a separable box blur
+     * only spreads along the axes: its exterior feather dies at corners and
+     * diagonal edges, which rendered the first band attempt as a DOTTED line
+     * that missed corners (device report). Every texel within range gets a
+     * value here by construction - the line is solid around corners and
+     * straddles the edge (half in the mesh, half out) so it visually sits
+     * ON the silhouette.
+     *
+     * Cost: 4 sweep passes + 1 write pass over w*h (16k texels) on the
+     * inference thread, zero allocation (caller scratch [dOut]/[dIn]).
+     */
+    private fun buildOutlineBand(pix: IntArray, ring: IntArray, w: Int, h: Int,
+        dOut: IntArray, dIn: IntArray,
+    ) {
+        val n = w * h
+        val BIG = 0x3fffffff
+        // Seeds: distance-to-mesh starts 0 ON the mesh; distance-to-exterior
+        // starts 0 OFF the mesh; everything else is "unreached" (BIG).
+        java.util.Arrays.fill(dOut, BIG)
+        java.util.Arrays.fill(dIn, BIG)
+        for (i in 0 until n) {
+            if ((pix[i] ushr 24) >= MESH_ALPHA_CUTOFF) dOut[i] = 0 else dIn[i] = 0
+        }
+        // 3-4 chamfer: cardinals cost 3, diagonals 4 (texel unit = 3).
+        // Forward sweep: propagate from top/left neighbours...
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
+                var o = dOut[i]
+                var d = dIn[i]
+                if (x > 0) {
+                    val t = dOut[i - 1] + 3; if (t < o) o = t
+                    val u = dIn[i - 1] + 3; if (u < d) d = u
+                }
+                if (y > 0) {
+                    var t = dOut[i - w] + 3; if (t < o) o = t
+                    var u = dIn[i - w] + 3; if (u < d) d = u
+                    if (x > 0) {
+                        t = dOut[i - w - 1] + 4; if (t < o) o = t
+                        u = dIn[i - w - 1] + 4; if (u < d) d = u
+                    }
+                    if (x < w - 1) {
+                        t = dOut[i - w + 1] + 4; if (t < o) o = t
+                        u = dIn[i - w + 1] + 4; if (u < d) d = u
+                    }
+                }
+                dOut[i] = o
+                dIn[i] = d
+            }
+        }
+        // ... then a backward sweep from bottom/right neighbours completes it.
+        for (y in h - 1 downTo 0) {
+            for (x in w - 1 downTo 0) {
+                val i = y * w + x
+                var o = dOut[i]
+                var d = dIn[i]
+                if (x < w - 1) {
+                    val t = dOut[i + 1] + 3; if (t < o) o = t
+                    val u = dIn[i + 1] + 3; if (u < d) d = u
+                }
+                if (y < h - 1) {
+                    var t = dOut[i + w] + 3; if (t < o) o = t
+                    var u = dIn[i + w] + 3; if (u < d) d = u
+                    if (x < w - 1) {
+                        t = dOut[i + w + 1] + 4; if (t < o) o = t
+                        u = dIn[i + w + 1] + 4; if (u < d) d = u
+                    }
+                    if (x > 0) {
+                        t = dOut[i + w - 1] + 4; if (t < o) o = t
+                        u = dIn[i + w - 1] + 4; if (u < d) d = u
+                    }
+                }
+                dOut[i] = o
+                dIn[i] = d
+            }
+        }
+        // Convert distances to an alpha ramp peaking at the boundary:
+        //   alpha(t) = 255 * clamp01((R + 1 - t) / R),  t in texels.
+        // Outer side: t=1 (boundary-adjacent) -> 255, t=R+1 -> 0.
+        // Inner side: same shape inside the mesh - the line straddles the edge.
+        for (i in 0 until n) {
+            val solid = (pix[i] ushr 24) >= MESH_ALPHA_CUTOFF
+            val dist = if (solid) dIn[i] else dOut[i]
+            if (dist <= 0 || dist >= BIG) continue   // wrong side / unreached
+            val t = dist / 3f
+            val reach = if (solid) RING_IN_TEXELS else RING_OUT_TEXELS
+            if (t > reach + 1f) continue
+            val ra = (255f * ((reach + 1f - t) / reach)).toInt().coerceIn(0, 255)
+            if (ra > 0) ring[i] = (ra shl 24) or 0x00FFFFFF
+        }
+    }
+
+    /**
      * Erases noise-speckle components (below SPECKLE_FRACTION of the largest
-     * component, floor MIN_SPECKLE_PX) from BOTH the mesh [pix] and the
-     * outline band [ring] - speckles must not tint or outline anything,
-     * regardless of the outline toggle. Two cheap sweeps over the ~16k-texel
+     * component, floor MIN_SPECKLE_PX) from the mesh [pix] - speckles must
+     * not tint anything regardless of the outline toggle, and the outline
+     * band is derived from the mesh AFTER this pass, so erased speckles
+     * never grow an outline either. Two cheap sweeps over the ~16k-texel
      * mask (background thread): pass 1 finds the largest component's size,
      * pass 2 zeroes every component below the floor. Uses caller-provided
      * scratch (stack/seen/comp) - no allocation per detection.
      */
-    private fun removeSpeckles(pix: IntArray, ring: IntArray, w: Int, h: Int,
+    private fun removeSpeckles(pix: IntArray, w: Int, h: Int,
         stack: IntArray, seen: BooleanArray, comp: IntArray,
     ) {
         val n = w * h
@@ -505,26 +596,7 @@ class YoloPostProcessor(
                 if (y < h - 1) { val k = j + w; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
             }
             if (cc < floor) {
-                for (i in 0 until cc) {
-                    val j = comp[i]
-                    pix[j] = 0
-                    ring[j] = 0
-                    // Also erase the speckle's BAND halo: the outline band
-                    // sits OUTSIDE the solid component (never part of it),
-                    // so without a small outward sweep the erased speckle
-                    // would keep a floating outline ring.
-                    val x = j % w
-                    val y = j / w
-                    for (dy in -2..2) {
-                        val yy = y + dy
-                        if (yy < 0 || yy >= h) continue
-                        for (dx in -2..2) {
-                            val xx = x + dx
-                            if (xx < 0 || xx >= w) continue
-                            ring[yy * w + xx] = 0
-                        }
-                    }
-                }
+                for (i in 0 until cc) pix[comp[i]] = 0
             }
         }
     }
