@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Editor: toolbar rows + annotation canvas + status line.
+     Row A  back / project name / Save
+     Row B  mode switch (Edit | Magic Touch) + undo/redo
+     Row C  contextual actions (polygon tools XOR magic-touch tools)
+     Canvas AnnotationView (weight 1), then the status hint. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:orientation="vertical">
+
+    <!-- Row A -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="14dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="6dp">
+
+        <TextView
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="7dp"
+            android:text="←"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"/>
+
+        <TextView
+            android:id="@+id/titleText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:ellipsize="middle"
+            android:singleLine="true"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:textStyle="bold"/>
+
+        <TextView
+            android:id="@+id/btnSave"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_btn_lime_round"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="7dp"
+            android:text="Save"
+            android:textColor="#0B0B0D"
+            android:textSize="13sp"
+            android:textStyle="bold"/>
+    </LinearLayout>
+
+    <!-- Row B: mode switch + history -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="14dp"
+        android:paddingBottom="6dp">
+
+        <TextView
+            android:id="@+id/btnModeEdit"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="7dp"
+            android:text="✏  Edit"
+            android:textColor="#00E676"
+            android:textSize="13sp"
+            android:textStyle="bold"/>
+
+        <TextView
+            android:id="@+id/btnModeMagic"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="7dp"
+            android:text="✨  Magic Touch"
+            android:textColor="#64748B"
+            android:textSize="13sp"
+            android:textStyle="bold"/>
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"/>
+
+        <TextView
+            android:id="@+id/btnUndo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="11dp"
+            android:paddingVertical="7dp"
+            android:text="↶"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"/>
+
+        <TextView
+            android:id="@+id/btnRedo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="11dp"
+            android:paddingVertical="7dp"
+            android:text="↷"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"/>
+    </LinearLayout>
+
+    <!-- Row C-1: polygon tools (Edit mode) -->
+    <LinearLayout
+        android:id="@+id/editActions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="14dp"
+        android:paddingBottom="6dp">
+
+        <TextView
+            android:id="@+id/btnDraw"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="7dp"
+            android:text="＋  Polygon"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:textStyle="bold"/>
+
+        <TextView
+            android:id="@+id/btnCancelDraft"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="7dp"
+            android:text="Cancel"
+            android:textColor="#64748B"
+            android:textSize="13sp"/>
+
+        <TextView
+            android:id="@+id/btnShapes"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="7dp"
+            android:text="Shapes"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"/>
+    </LinearLayout>
+
+    <!-- Row C-2: Magic Touch tools (hidden in Edit mode) -->
+    <LinearLayout
+        android:id="@+id/magicActions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="14dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/btnBrushAdd"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="7dp"
+            android:text="＋ Add"
+            android:textColor="#00E676"
+            android:textSize="13sp"
+            android:textStyle="bold"/>
+
+        <TextView
+            android:id="@+id/btnBrushRemove"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="7dp"
+            android:text="− Remove"
+            android:textColor="#64748B"
+            android:textSize="13sp"
+            android:textStyle="bold"/>
+
+        <TextView
+            android:id="@+id/btnStrokeUndo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="7dp"
+            android:text="↶ Stroke"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"/>
+
+        <TextView
+            android:id="@+id/btnClearMagic"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_glass_btn"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="7dp"
+            android:text="Clear"
+            android:textColor="#64748B"
+            android:textSize="13sp"/>
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"/>
+
+        <TextView
+            android:id="@+id/btnConvert"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_btn_lime_round"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="7dp"
+            android:text="▶ Polygon"
+            android:textColor="#0B0B0D"
+            android:textSize="13sp"
+            android:textStyle="bold"/>
+    </LinearLayout>
+
+    <com.example.meshlabel.ui.AnnotationView
+        android:id="@+id/annotationView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"/>
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="10dp"
+        android:text="Tap a shape to select it"
+        android:textColor="#64748B"
+        android:textSize="12sp"/>
+</LinearLayout>

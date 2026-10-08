@@ -635,3 +635,52 @@ Knobs (single source of truth): `MaskGeometry` — `MESH_ALPHA_CUTOFF=104`,
 `RING_OUT_TEXELS=2`, `RING_IN_TEXELS=1`, `RING_OUT_MIN=1`, `RING_IN_MIN=0.5`,
 `BAND_FULL_RADIUS=12`, `MAX_SMOOTH_PASSES=2`, `SPECKLE_FRACTION=0.10`,
 `MIN_SPECKLE_PX=12`.
+
+
+## 🏷️ Round 20 — MESHLABEL: LabelMe-style annotation app (same repo, sibling directory) (2026-10-09)
+
+New requirement: a **LabelMe-like Android app for image segmentation /
+dataset creation** — draw masks, save exact LabelMe JSON, plus Google AI
+Edge Gallery's "Magic Touch" scribble segmentation (add/remove selection
+strokes via MediaPipe interactive segmenter). Same GitHub repository, own
+directory, CI-only builds.
+
+**Repo restructure (prerequisite):** git root promoted from `AIMESHVISION/`
+to `ANDROID/` (commit `0bb6da4`, 72 renames, history intact) so both apps
+live side by side in `testplay-byte/TESTMESH`; the AIMESHVISION workflow
+now runs with `working-directory: AIMESHVISION`.
+
+**Research** (dedicated agent, report kept in project notes): exact
+MediaPipe `InteractiveSegmenter` Kotlin API (`setImage` once →
+`segment(List<Stroke>)`, per-stroke POSITIVE/NEGATIVE polarity, normalized
+keypoints, `ByteBufferExtractor` confidence mask > 0.5), the gallery's
+Scrapbook pipeline (index-based stroke undo, stale-id guard), the exact
+LabelMe v7 JSON schema from `wkentaro/labelme/_label_file.py`, and
+mask→polygon options (hand-rolled chosen: no 20-80MB OpenCV).
+
+**MESHLABEL/** (new Gradle project, AGP 9.0.1/JDK21 like its sibling):
+
+| Piece | File | Notes |
+|---|---|---|
+| LabelMe JSON (exact schema) | `labelme/LabelMeJson.kt` | version/flags/shapes/imagePath/imageData/base64/imageHeight/imageWidth; shape: label/points(px)/group_id/shape_type/flags/description; tolerant loader |
+| Mask → polygon | `seg/MaskToPolygon.kt` | pure Kotlin: marching squares on the pixel-center lattice → integer-key loop chaining (single-direction closure walk) → Ramer-Douglas-Peucker; ≤1024px downscale path; saddle rule documented |
+| Magic Touch wrapper | `seg/InteractiveSegmenterManager.kt` | bundled `interactive_segmentation.task` (30MB, verified zip), single-thread executor, setImage-once, requestId stale-guard, 0.5 threshold |
+| Storage | `store/ProjectStore.kt` | labelme side-by-side folders `MeshLabel/<name>/<name>.jpg|.json`, bounded decode (4096), base64 imageData |
+| YOLO-seg export | `store/YoloSegExporter.kt` | `class_id x1 y1…` 6-decimal normalized lines, classes.txt, dataset.yaml (pure `yoloLine` unit-tested) |
+| Canvas | `ui/AnnotationView.kt` | ALL annotation coords = ORIGINAL image px (decode-downscale rescaled at the mapping boundary); vertex drag, draft polygon w/ close-on-first-dot, stroke rendering, mask preview overlay |
+| Screens | `LibraryActivity` / `EditorActivity` | photo-picker import, snapshot undo/redo (cap 50), label prompt, shapes list actions, save/unsaved-guard |
+
+**Verification (Kotlin-native, no Python):** `MaskToPolygonTest` +
+`LabelMeJsonTest` + `YoloLineTest` — **11/11 green locally**
+(`gradlew :app:testDebugUnitTest`; debug+test compile clean). Bugs the
+tests caught during development: two-sided loop walk folding the ring
+(−12% area), RDP anchored on adjacent ring points (edge slants), Builder
+API misuse. CI: new `.github/workflows/build-meshlabel.yml` (unit tests →
+assembleDebug → assembleRelease(unsigned) → MESHLABEL-debug/-release
+artifacts).
+
+Notes: portrait-locked; one polygon per Magic Touch selection (largest
+loop); release unsigned (no project keystore for this app — debug APK is
+the installable artifact); the dedicated builder sub-agent was
+safety-rejected mid-task, so the app was built in the main session
+(agent delivered the model asset download + the research report).

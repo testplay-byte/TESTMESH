@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Dark no-action-bar theme on the Material Components base (same base
+        as the sibling AIMESHVISION app) so Material widgets inflate safely.
+        Black/lime visual identity to match the sibling tool.
+    -->
+    <style name="Theme.MeshLabel" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">#0A0A0C</item>
+        <item name="android:navigationBarColor">#0A0A0C</item>
+        <item name="android:colorPrimary">@android:color/black</item>
+        <item name="android:colorPrimaryDark">@android:color/black</item>
+        <item name="android:colorAccent">#00FF00</item>
+    </style>
+</resources>
