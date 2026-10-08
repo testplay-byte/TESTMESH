@@ -777,9 +777,37 @@ class OverlayView @JvmOverloads constructor(
 
     // ── drawing (cached geometry only) ────────────────────────────────────────
 
+    // Offscreen mesh compositor. Masks are drawn into this buffer at FULL
+    // alpha (colour baked per class), then the whole buffer is blitted once
+    // at MASK_ALPHA. SRC_OVER of opaque same-colour pixels is idempotent, so
+    // overlapping instances can no longer compound 110 -> 163 -> 197 toward
+    // opacity - the "mesh turns solid with ten hands" bug. Allocated lazily,
+    // screen-sized, reused across frames.
+    private var meshBitmap: Bitmap? = null
+    private var meshCanvas: Canvas? = null
+    private val meshBlitPaint = Paint()
+
+    private fun meshBuffer(): Canvas {
+        val w = width.coerceAtLeast(1)
+        val h = height.coerceAtLeast(1)
+        val existing = meshBitmap
+        if (existing == null || existing.width != w || existing.height != h) {
+            val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            meshBitmap = b
+            meshCanvas = Canvas(b)
+        }
+        meshCanvas!!.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        return meshCanvas!!
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (prepared.isEmpty()) return
+        // Snapshot once: PASS 1 and PASS 3 must see the SAME list instance,
+        // or pathsPerItem[i] could pair with a different item if setResults
+        // ever runs off the main thread (currently main-confined by caller
+        // discipline only).
+        val items = prepared
+        if (items.isEmpty()) return
 
         // fitCenter mapping between the source image and this view.
         val scaleX = width.toFloat() / sourceImageWidth
@@ -789,8 +817,60 @@ class OverlayView @JvmOverloads constructor(
         val scaledH = sourceImageHeight * scale
         val offsetX = (width - scaledW) / 2f
         val offsetY = (height - scaledH) / 2f
+        val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
 
-        for (item in prepared) {
+        // PASS 1 - compose every mask into the offscreen buffer at FULL
+        // alpha, each clipped to its own contour (closed by construction).
+        // Successive clipPath calls INTERSECT, so clip+draw PER path.
+        val bc = meshBuffer()
+        // Stroke paths are built here and cached for PASS 3.
+        val pathsPerItem = ArrayList<List<Path>>(items.size)
+        var drewAnyMask = false
+        for (item in items) {
+            val mask = item.det.maskBitmap
+            val classColor = DetectionStyle.colorFor(item.det.classId)
+            val paths = if (mask != null && showSmoothOutline) {
+                item.chains.mapNotNull { chain ->
+                    if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
+                }
+            } else emptyList()
+            pathsPerItem.add(paths)
+            if (mask == null) continue
+
+            if (paths.isEmpty()) {
+                // Outline off or no contour: full mask.
+                drewAnyMask = true
+                drawMaskFullAlpha(bc, mask, maskRect, classColor)
+            } else {
+                val sane = paths.filter { isSaneClipPath(it, maskRect) }
+                if (sane.isEmpty()) {
+                    drewAnyMask = true
+                    drawMaskFullAlpha(bc, mask, maskRect, classColor)
+                } else {
+                    drewAnyMask = true
+                    for (p in sane) {
+                        val save = bc.save()
+                        bc.clipPath(p)
+                        drawMaskFullAlpha(bc, mask, maskRect, classColor)
+                        bc.restoreToCount(save)
+                    }
+                }
+            }
+        }
+
+        // PASS 2 - ONE translucent blit: alpha applied once to the union of
+        // all masks, so translucency is uniform no matter how many objects
+        // overlap (the old per-instance 110-alpha draws compounded in
+        // overlap regions and read as solid).
+        if (drewAnyMask) {
+            meshBlitPaint.alpha = MASK_ALPHA
+            canvas.drawBitmap(meshBitmap!!, 0f, 0f, meshBlitPaint)
+        }
+
+        // PASS 3 - opaque strokes, then boxes/labels per item: the line stays
+        // at full strength centred on the boundary, above the tinted mesh.
+        for (i in items.indices) {
+            val item = items[i]
             val det = item.det
             val classColor = DetectionStyle.colorFor(det.classId)
 
@@ -800,43 +880,11 @@ class OverlayView @JvmOverloads constructor(
             val bottom = det.boundingBox.bottom * scaledH + offsetY
             val screenRect = RectF(left, top, right, bottom)
 
-            val mask = det.maskBitmap
-            if (mask != null) {
-                val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
-
-                // Every contour is closed by construction, so each is a valid
-                // clip region. One tinted-mesh draw per contour: successive
-                // clipPath calls INTERSECT (not union), so disjoint blobs must
-                // be clipped+drawn one at a time or the region collapses.
-                val paths = if (showSmoothOutline) {
-                    item.chains.mapNotNull { chain ->
-                        if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
-                    }
-                } else emptyList()
-
-                if (paths.isEmpty()) {
-                    // Outline off (or no contour): plain full mask.
-                    drawTintedMask(canvas, mask, maskRect, classColor)
-                } else {
-                    val sane = paths.filter { isSaneClipPath(it, maskRect) }
-                    if (sane.isEmpty()) {
-                        drawTintedMask(canvas, mask, maskRect, classColor)
-                    } else {
-                        for (p in sane) {
-                            val save = canvas.save()
-                            canvas.clipPath(p)
-                            drawTintedMask(canvas, mask, maskRect, classColor)
-                            canvas.restoreToCount(save)
-                        }
-                    }
-                    // Stroke ON TOP of the tint: the opaque line stays at full
-                    // strength (drawn first and then tinted over, it read as a
-                    // washed-out half-width line) and sits centred on the
-                    // boundary - half on the mesh, half outside it.
-                    linePaint.color = DetectionStyle.vibrantFor(classColor)
-                    linePaint.alpha = 255
-                    for (p in paths) canvas.drawPath(p, linePaint)
-                }
+            val paths = pathsPerItem[i]
+            if (paths.isNotEmpty()) {
+                linePaint.color = DetectionStyle.vibrantFor(classColor)
+                linePaint.alpha = 255
+                for (p in paths) canvas.drawPath(p, linePaint)
             }
 
             if (showBoxes) {
@@ -892,11 +940,17 @@ class OverlayView @JvmOverloads constructor(
     /** Class id -> uppercase label (avoids per-frame string churn). */
     private val labelCache = HashMap<Int, String>()
 
-    private fun drawTintedMask(
+    /**
+     * Draws one mask at FULL alpha (colour baked) into the offscreen
+     * composite buffer. Translucency is applied later by the single blit -
+     * see [meshBuffer]. Never draw masks at MASK_ALPHA directly: overlapping
+     * instances compound alpha and turn the mesh solid.
+     */
+    private fun drawMaskFullAlpha(
         canvas: Canvas, mask: Bitmap, maskRect: RectF, classColor: Int,
     ) {
         maskPaint.colorFilter = colorFilterFor(classColor)
-        maskPaint.alpha = MASK_ALPHA
+        maskPaint.alpha = 255
         canvas.drawBitmap(mask, null, maskRect, maskPaint)
     }
 
