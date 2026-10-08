@@ -523,6 +523,7 @@ class MainActivity : AppCompatActivity() {
         toggleSmooth.setCheckedSilent(overlayView.showSmoothOutline)
         toggleSmooth.onCheckedChangeListener = { checked ->
             overlayView.showSmoothOutline = checked
+            if (checked) overlayView.onOutlineEnabled()
             prefs.edit().putBoolean(PREF_SMOOTH, checked).apply()
         }
 

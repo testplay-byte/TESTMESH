@@ -107,7 +107,24 @@ class OverlayView @JvmOverloads constructor(
         private const val CORNER_SMOOTH_K = 0.35f
         private const val CORNER_SMOOTH_ITERS = 2
 
-        private const val LINE_STROKE_W = 5f     // screen px (old look)
+        // Screen stroke width at the reference device width; onDraw scales
+        // it with the actual view width so the border keeps the same relative
+        // weight on any resolution. (Fixed 5px read as "way too thin"; note
+        // the outside-clip keeps only the OUTER half, so visible = width/2.)
+        private const val LINE_STROKE_W = 10f
+        private const val LINE_STROKE_REF_W = 1080f
+
+        // NOISE-PEAK REMOVAL: masks carry 1-3 mask px boundary jaggies; a
+        // jaggy is a CLOSED DETOUR - the contour leaves the local chord and
+        // returns (net turn ~0 inside a short window) with a sharp vertex in
+        // it, while staying shallower than NOISE_PEAK_DEPTH. Real features
+        // (fingertips) turn one way only (net turn != 0) or are deeper than
+        // NOISE_PEAK_DEPTH (real valleys) - both survive. Tunables: raise
+        // NOISE_REMOVE_DEG / lower NOISE_PEAK_DEPTH to preserve more detail.
+        private const val NOISE_REMOVE_DEG = 34.0
+        private const val NOISE_REMOVE_RADIUS = 3
+        private const val NOISE_WIGGLE_NET_DEG = 20.0
+        private const val NOISE_PEAK_DEPTH = 3.5f
 
         // ── temporal smoothing (dot EMA + label anchor) ──────────────────
         private const val SMOOTHING = 0.45f
@@ -279,12 +296,18 @@ class OverlayView @JvmOverloads constructor(
                     val primaryPrev = inst?.track
                     val primaryLenMatch = primaryPrev != null &&
                         primaryPrev.points.size == primary.size
-                    val primaryGateOk = primaryLenMatch &&
-                        firstDotClose(primaryPrev!!.points, primary)
+                    // Phase-align to the previous track first (the anchor
+                    // can hop along a flat top edge; without this the gate
+                    // mis-fires and the blend pairs unrelated points), then
+                    // gate, then blend.
                     val primarySmoothed = when {
                         !primaryLenMatch -> primary
-                        primaryGateOk -> emaSoft(primaryPrev!!, primary)
-                        else -> emaSoft(primaryPrev!!, primary, RAW_BIAS_ON_GATE_MISS)
+                        else -> {
+                            val pp = primaryPrev!!
+                            val aligned = alignTo(pp.points, primary)
+                            if (firstDotClose(pp.points, aligned)) emaSoft(pp, aligned)
+                            else emaSoft(pp, aligned, RAW_BIAS_ON_GATE_MISS)
+                        }
                     }
                     outContours.add(primarySmoothed)
                     nextTracks.add(Track(primarySmoothed.toTypedArray()))
@@ -310,14 +333,12 @@ class OverlayView @JvmOverloads constructor(
                         }
                         val prev = if (bestK >= 0) prevSec!![bestK] else null
                         if (bestK >= 0) secUsed[bestK] = true
-                        val correspondable = prev != null && firstDotClose(prev.points, chain)
-                        val smoothed = when {
-                            prev == null -> chain
-                            correspondable -> emaSoft(prev, chain)
-                            // Matched but outside the gate: reduced-weight
-                            // blend instead of a pop to raw (same policy as
-                            // the primary path).
-                            else -> emaSoft(prev, chain, RAW_BIAS_ON_GATE_MISS)
+                        val smoothed = if (prev == null) {
+                            chain
+                        } else {
+                            val aligned = alignTo(prev.points, chain)
+                            if (firstDotClose(prev.points, aligned)) emaSoft(prev, aligned)
+                            else emaSoft(prev, aligned, RAW_BIAS_ON_GATE_MISS)
                         }
                         outContours.add(smoothed)
                         if (ci <= MAX_SECONDARY_EMA) {
@@ -355,6 +376,24 @@ class OverlayView @JvmOverloads constructor(
         prepared = items
         invalidate()
         Perf.log("overlay-setResults", perfT)
+    }
+
+    /**
+     * Called when the outline toggle turns ON: while it was off, setResults
+     * skipped contour extraction (perf gate), so cached detections hold
+     * empty chains - re-extract them here (one-shot cost paid only on the
+     * toggle, e.g. while the gallery is paused and no inference is running).
+     */
+    fun onOutlineEnabled() {
+        if (prepared.isEmpty()) return
+        val rebuilt = ArrayList<PreparedItem>(prepared.size)
+        for (item in prepared) {
+            val chains = item.det.maskBitmap?.let { extractContours(it) }
+                ?: emptyList()
+            rebuilt.add(PreparedItem(item.det, chains))
+        }
+        prepared = rebuilt
+        invalidate()
     }
 
     fun clear() {
@@ -504,7 +543,15 @@ class OverlayView @JvmOverloads constructor(
             val simplified = simplifyAnchored(anchored, DP_EPSILON)
             if (simplified.size < 3) continue
 
-            val resampled = resampleClosed(simplified, CONTOUR_POINTS)
+            // Noise-peak removal: 1-3 mask px boundary jaggies survive DP
+            // (their deviation exceeds the epsilon) and later register as
+            // sharp "corners" - so the border spikes out after every tiny
+            // mesh peak instead of flowing smoothly. Delete detour-vertices
+            // BEFORE resampling/corner detection so the outline reads the
+            // shape, not the noise.
+            val cleaned = removeNoiseDots(simplified)
+
+            val resampled = resampleClosed(cleaned, CONTOUR_POINTS)
             if (resampled.size < 3) continue
 
             // Corner-aware smoothing: damp the residual micro-wiggle (the
@@ -526,6 +573,121 @@ class OverlayView @JvmOverloads constructor(
         // Biggest blob first: index 0 is the primary outline.
         out.sortByDescending { it.first }
         return out.map { it.second }
+    }
+
+    /**
+     * Deletes noise-peak vertices from a simplified closed contour.
+     *
+     * A noise jaggy is detected as a CLOSED DETOUR: within a window of
+     * [NOISE_REMOVE_RADIUS]+1 vertices the net turn is ~0 (the contour left
+     * the local chord and came back), the sharpest vertex in the window is
+     * >= [NOISE_REMOVE_DEG], the detour is shallower than
+     * [NOISE_PEAK_DEPTH] mask px, and the vertex is not the trace anchor.
+     * The sharpest vertex is removed and the gap rebridged linearly.
+     *
+     * Genuine features are protected structurally: a fingertip turns one way
+     * only (its window net turn equals its own large turn, never ~0), and a
+     * real notch between fingers is deeper than NOISE_PEAK_DEPTH.
+     *
+     * @return the cleaned contour (or [ptsIn] when nothing qualifies).
+     */
+    private fun removeNoiseDots(
+        ptsIn: List<Pair<Float, Float>>,
+    ): List<Pair<Float, Float>> {
+        var pts = ptsIn
+        if (pts.size < 16) return pts
+        var guard = 0
+        while (pts.size > 8 && guard++ < 64) {
+            val n = pts.size
+            val turn = DoubleArray(n)
+            for (i in 0 until n) {
+                turn[i] = turnBetween(pts[(i - 1 + n) % n], pts[i],
+                    pts[(i + 1) % n])
+            }
+            var victim = -1
+            var victimTurn = 0.0
+            for (i in 0 until n) {
+                var net = 0.0
+                var sharp = -1
+                var sharpT = 0.0
+                var minX = Float.MAX_VALUE
+                var maxX = -Float.MAX_VALUE
+                var minY = Float.MAX_VALUE
+                var maxY = -Float.MAX_VALUE
+                for (k in 0..NOISE_REMOVE_RADIUS) {
+                    val j = (i + k) % n
+                    net += turn[j]
+                    if (kotlin.math.abs(turn[j]) > sharpT) {
+                        sharpT = kotlin.math.abs(turn[j])
+                        sharp = j
+                    }
+                    val px = pts[j].first
+                    val py = pts[j].second
+                    if (px < minX) minX = px
+                    if (px > maxX) maxX = px
+                    if (py < minY) minY = py
+                    if (py > maxY) maxY = py
+                }
+                // Closed detour + sharp vertex + shallow depth + anchor safe.
+                if (sharp < 0 || sharp == 0) continue
+                if (kotlin.math.abs(net) > NOISE_WIGGLE_NET_DEG) continue
+                if (sharpT < NOISE_REMOVE_DEG) continue
+                val depth = maxOf(maxX - minX, maxY - minY)
+                if (depth >= NOISE_PEAK_DEPTH) continue   // real feature
+                if (sharpT > victimTurn) { victimTurn = sharpT; victim = sharp }
+            }
+            if (victim < 0) break
+            val rebuilt = ArrayList<Pair<Float, Float>>(n - 1)
+            for (i in 0 until n) if (i != victim) rebuilt.add(pts[i])
+            pts = rebuilt
+        }
+        return pts
+    }
+
+    /** Signed turn angle in degrees at vertex b (incoming a->b, outgoing b->c). */
+    private fun turnBetween(
+        a: Pair<Float, Float>, b: Pair<Float, Float>, c: Pair<Float, Float>,
+    ): Double {
+        val a1 = Math.atan2((b.second - a.second).toDouble(),
+            (b.first - a.first).toDouble())
+        val a2 = Math.atan2((c.second - b.second).toDouble(),
+            (c.first - b.first).toDouble())
+        var d = Math.toDegrees(a2 - a1)
+        while (d > 180.0) d -= 360.0
+        while (d < -180.0) d += 360.0
+        return d
+    }
+
+    /**
+     * Phase-aligns [raw] to [prev] for temporal blending: both contours have
+     * the same point count but their lattice phase can shift when the trace
+     * anchor hops along a flat/noisy top edge or the object rotates. Finds
+     * the cyclic offset minimizing point-to-point squared distance and
+     * rotates [raw] by it, so EMA always blends point i with the point that
+     * is actually the same boundary location. Returns [raw] unchanged when
+     * offset 0 wins (the common stable case - no allocation).
+     */
+    private fun alignTo(
+        prev: Array<Pair<Float, Float>>, raw: List<Pair<Float, Float>>,
+    ): List<Pair<Float, Float>> {
+        val n = raw.size
+        if (n < 8 || prev.size != n) return raw
+        var bestO = 0
+        var bestC = Double.MAX_VALUE
+        for (o in 0 until n) {
+            var c = 0.0
+            for (i in 0 until n) {
+                val dx = (prev[i].first - raw[(i + o) % n].first).toDouble()
+                val dy = (prev[i].second - raw[(i + o) % n].second).toDouble()
+                c += dx * dx + dy * dy
+                if (c >= bestC) break      // early bail: cannot win
+            }
+            if (c < bestC) { bestC = c; bestO = o }
+        }
+        if (bestO == 0) return raw
+        val out = ArrayList<Pair<Float, Float>>(n)
+        for (i in 0 until n) out.add(raw[(i + bestO) % n])
+        return out
     }
 
     /**
@@ -952,25 +1114,24 @@ class OverlayView @JvmOverloads constructor(
         // filled mesh contours", so only the OUTER half of the stroke
         // survives - one continuous border hugging the outside of the mesh,
         // with no geometry distortion (and therefore no corner artifacts).
-        var anyStroke = false
-        for (paths in pathsPerItem) if (paths.isNotEmpty()) { anyStroke = true; break }
-        if (anyStroke) {
+        // Clipped PER OBJECT (whole view minus THIS item's own fill): one
+        // object's outline can never erase a neighbour's, and the stroke
+        // path stays the pristine boundary - only its outer half survives.
+        linePaint.strokeWidth = LINE_STROKE_W *
+            (width / LINE_STROKE_REF_W).coerceIn(0.75f, 2f)
+        for (i in items.indices) {
+            val paths = pathsPerItem[i]
+            if (paths.isEmpty()) continue
             outsideClipPath.reset()
             outsideClipPath.addRect(-4f, -4f, width + 4f, height + 4f,
                 Path.Direction.CW)
-            for (paths in pathsPerItem) {
-                for (p in paths) outsideClipPath.op(p, Path.Op.DIFFERENCE)
-            }
+            for (p in paths) outsideClipPath.op(p, Path.Op.DIFFERENCE)
             val strokeSave = canvas.save()
             canvas.clipPath(outsideClipPath)
-            for (i in items.indices) {
-                val paths = pathsPerItem[i]
-                if (paths.isEmpty()) continue
-                val classColor = DetectionStyle.colorFor(items[i].det.classId)
-                linePaint.color = DetectionStyle.vibrantFor(classColor)
-                linePaint.alpha = 255
-                for (p in paths) canvas.drawPath(p, linePaint)
-            }
+            val classColor = DetectionStyle.colorFor(items[i].det.classId)
+            linePaint.color = DetectionStyle.vibrantFor(classColor)
+            linePaint.alpha = 255
+            for (p in paths) canvas.drawPath(p, linePaint)
             canvas.restoreToCount(strokeSave)
         }
 
