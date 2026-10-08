@@ -41,16 +41,24 @@ class ModelManager {
         const val DEFAULT_IOU = 0.45f
         const val DEFAULT_MAX_RESULTS = 20
 
-        // Split & detect (tiled inference): overlap between adjacent tiles in
-        // SOURCE pixels, and a hard cap on total tiles per frame so latency
-        // stays bounded (tile axes shrink / tiles grow to fit).
-        private const val TILE_OVERLAP = 128
-        private const val MAX_TILES_TOTAL = 12
-        // Cross-tile merge: two detections of the same class whose boxes
-        // overlap at least this much are treated as the SAME object seen from
-        // two tiles (typical split-across-seam IoU ~0.3-0.6; two distinct
-        // adjacent objects rarely reach 0.15).
-        private const val TILE_MERGE_IOU = 0.15f
+        // ── split & detect: two-pass refine (user spec: full detection
+        // FIRST, then targeted passes ONLY around the objects found) ─────────
+        // Latency = 1 + up to REFINE_MAX inferences; empty frame areas cost
+        // nothing extra (the old equal-grid split ran 12 tiles regardless).
+        private const val REFINE_MAX = 4
+        // Crop = detection box expanded by this factor per axis, so the
+        // object isn't cut at the crop edge.
+        private const val REFINE_EXPAND = 1.6f
+        // Below this crop size (px) a refine adds no detail - the model
+        // would only be re-upscaling a region it already saw clearly.
+        private const val REFINE_MIN_CROP = 384
+        // A refined detection replaces its pass-1 counterpart only when the
+        // refine pass held at least this fraction of the confidence: refine
+        // is opportunistic and must never downgrade a detection.
+        private const val REFINE_KEEP_CONF = 0.8f
+        // Same-class box IoU above which boxes across passes are the SAME
+        // object (replace, not duplicate).
+        private const val REFINE_MERGE_IOU = 0.3f
     }
 
     private var interpreter: Interpreter? = null
@@ -78,11 +86,12 @@ class ModelManager {
     @Volatile var confidenceThreshold: Float = DEFAULT_CONFIDENCE
 
     /**
-     * Split & detect: when on, frames larger than the model input are cut
-     * into overlapping tiles, each inferred at full model resolution, then
-     * remapped and merged back to whole-frame detections. Catches small
-     * objects the single-pass downscale would swallow, at tile-count x the
-     * latency - opt-in from settings.
+     * Split & detect (two-pass refine): pass 1 runs the normal full-frame
+     * inference; pass 2 re-infers small crops centred on the detections
+     * found, where the object fills the model input (much higher effective
+     * resolution), and swaps in the improved box/mask. Only areas WITH an
+     * object get extra compute - cost 1 + up to [REFINE_MAX] inferences,
+     * opt-in from settings.
      */
     @Volatile var tileInferenceEnabled: Boolean = false
     @Volatile var nmsIouThreshold: Float = DEFAULT_IOU
@@ -240,20 +249,20 @@ class ModelManager {
     fun runInference(bitmap: Bitmap): List<Detection> {
         if (closed.get()) return emptyList()
 
-        // Split & detect: only worth tiling when the frame exceeds the model
-        // input on at least one axis.
+        // Split & detect: only worth the two-pass refine when the frame
+        // exceeds the model input on at least one axis.
         if (tileInferenceEnabled &&
             (bitmap.width > inputWidth || bitmap.height > inputHeight)
         ) {
-            var tiled = runTiledPass(bitmap)
-            if (tiled.isNotEmpty() || !usedGpu) return tiled
-            // GPU died mid-tiling -> reload on CPU and redo once (F6 parity
+            var refined = runRefinePass(bitmap)
+            if (refined.isNotEmpty() || !usedGpu) return refined
+            // GPU died mid-refine -> reload on CPU and redo once (F6 parity
             // with the single-pass path).
-            Log.w(TAG, "GPU tiled inference failed - falling back to CPU")
+            Log.w(TAG, "GPU refine inference failed - falling back to CPU")
             onGpuFallback?.invoke("GPU error - switched to CPU")
-            val file = currentModelFile ?: return tiled
-            if (!loadModel(file, useGpu = false)) return tiled
-            return runTiledPass(bitmap)
+            val file = currentModelFile ?: return refined
+            if (!loadModel(file, useGpu = false)) return refined
+            return runRefinePass(bitmap)
         }
 
         val attempt = runOnce(bitmap)
@@ -389,38 +398,57 @@ class ModelManager {
         buffer.rewind()
     }
 
-    // ── split & detect: tiled inference ──────────────────────────────────────
+    // ── split & detect: two-pass refine ─────────────────────────────────────
 
     /**
-     * Axis tiling: split [dim] into [cap] segments covered by tiles of at
-     * least size [t] with >= [TILE_OVERLAP] overlap. Returns (starts, size).
-     * When the natural count at size [t] exceeds [cap] (huge frames), tiles
-     * GROW so [cap] tiles still cover the whole axis with overlap - the model
-     * then sees each tile at a better scale than the single full-frame pass.
+     * Crop window for refining [box] (normalized full-frame): the box
+     * expanded by [REFINE_EXPAND], centred on it, clamped to the frame,
+     * floored at [REFINE_MIN_CROP]. Returns intArrayOf(x, y, w, h) in source
+     * pixels, or null when the crop would just be the full frame again (no
+     * refine value).
      */
-    private fun axisTiles(dim: Int, t: Int, cap: Int): Pair<List<Int>, Int> {
-        if (dim <= t) return listOf(0) to dim
-        val ov = TILE_OVERLAP
-        val stride = t - ov
-        // Natural count at tile size t.
-        var n = (dim - t + stride - 1) / stride + 1
-        if (n > cap) n = cap
-        if (n < 1) n = 1
-        // Size that lets n tiles cover dim with >= ov overlap:
-        //   n*size - (n-1)*ov >= dim  ->  size >= (dim + ov*(n-1)) / n
-        val size = maxOf(t, (dim + ov * (n - 1) + n - 1) / n)
-        val s2 = size - ov
-        val starts = ArrayList<Int>(n)
-        for (k in 0 until n) starts.add(minOf(k * s2, dim - size))
-        return starts to size
+    private fun cropRect(box: RectF, fw: Int, fh: Int): IntArray? {
+        var cw = (box.right - box.left) * fw * REFINE_EXPAND
+        var ch = (box.bottom - box.top) * fh * REFINE_EXPAND
+        if (cw < REFINE_MIN_CROP) cw = minOf(REFINE_MIN_CROP.toFloat(), fw.toFloat())
+        if (ch < REFINE_MIN_CROP) ch = minOf(REFINE_MIN_CROP.toFloat(), fh.toFloat())
+        if (cw > fw) cw = fw.toFloat()
+        if (ch > fh) ch = fh.toFloat()
+        if (cw >= fw && ch >= fh) return null
+        val w = cw.toInt().coerceAtMost(fw)
+        val h = ch.toInt().coerceAtMost(fh)
+        val x = ((box.left + box.right) / 2f * fw - w / 2f).toInt()
+            .coerceIn(0, fw - w)
+        val y = ((box.top + box.bottom) / 2f * fh - h / 2f).toInt()
+            .coerceIn(0, fh - h)
+        return intArrayOf(x, y, w, h)
     }
 
-    /** Natural tile count for an axis (for the total-budget calculation). */
-    private fun naturalCount(dim: Int, t: Int): Int {
-        if (dim <= t) return 1
-        val stride = t - TILE_OVERLAP
-        return (dim - t + stride - 1) / stride + 1
-    }
+    /** Remaps a crop-normalized box to full-frame normalized coordinates. */
+    private fun remapBox(b: RectF, cx: Int, cy: Int, cw: Int, ch: Int,
+        fw: Int, fh: Int): RectF = RectF(
+        (b.left * cw + cx) / fw,
+        (b.top * ch + cy) / fh,
+        (b.right * cw + cx) / fw,
+        (b.bottom * ch + cy) / fh,
+    )
+
+    /**
+     * Returns [det] (a crop-local detection) re-labelled so its mask covers
+     * the crop rect of the source image: the mask bitmap itself is passed
+     * through untouched (the overlay maps maskLeft/Top/Width/Height), so
+     * there is NO resample and NO full-frame compositing canvas - a crop
+     * mask stays ~128px (~64 KB) whatever the crop size.
+     */
+    private fun withCropMask(det: Detection, cx: Int, cy: Int, cw: Int, ch: Int,
+        fw: Int, fh: Int): Detection = Detection(
+        det.boundingBox, det.classId, det.confidence, det.label,
+        det.maskCoefficients, det.maskBitmap,
+        maskLeft = cx.toFloat() / fw,
+        maskTop = cy.toFloat() / fh,
+        maskWidth = cw.toFloat() / fw,
+        maskHeight = ch.toFloat() / fh,
+    )
 
     /** IoU of two normalized boxes (cross-tile merge). */
     private fun iouNorm(a: RectF, b: RectF): Float {
@@ -435,117 +463,114 @@ class ModelManager {
     }
 
     /**
-     * One tiled pass: grid over the frame (overlap >= [TILE_OVERLAP], total
-     * tiles <= [MAX_TILES_TOTAL]), infer each tile at full model resolution,
-     * remap boxes to whole-frame normalized coordinates, then greedily merge
-     * cross-tile duplicates (same class, box IoU >= [TILE_MERGE_IOU]) into
-     * one detection with the union box and the union mask (pasted at the
-     * owner tile's offset into a whole-frame mask canvas).
+     * Two-pass split & detect (user spec: full detection FIRST, then targeted
+     * passes only around the objects found - never an equal grid).
      *
-     * Never throws: failed tiles are skipped, an all-empty result with the
+     * Pass 1 - the normal whole-frame inference: catches everything at
+     * baseline resolution; empty areas cost nothing extra.
+     * Pass 2 - for the top [REFINE_MAX] detections, crop an expanded window
+     * around each and re-infer: the object now fills the 512px input (~3-10x
+     * effective resolution for a hand-sized box) => sharper box + mask. The
+     * refined result REPLACES its pass-1 counterpart when the refine pass
+     * held >= [REFINE_KEEP_CONF] of the confidence (refine never downgrades);
+     * objects visible only up close are ADDED when they don't duplicate any
+     * accepted detection ([REFINE_MERGE_IOU]); pass-1 detections that fail
+     * to refine keep their baseline version - the refine is opportunistic
+     * by construction.
+     *
+     * Never throws: failed crops are skipped; an all-empty result with the
      * GPU active is treated as a GPU failure by the caller.
      */
-    private fun runTiledPass(full: Bitmap): List<Detection> {
-        val w = full.width
-        val h = full.height
+    private fun runRefinePass(full: Bitmap): List<Detection> {
         if (interpreter == null || closed.get()) return emptyList()
+        val fw = full.width
+        val fh = full.height
 
-        // Total-tile budget: shrink the longer axis first, then the other.
-        var nx = naturalCount(w, inputWidth)
-        var ny = naturalCount(h, inputHeight)
-        while (nx * ny > MAX_TILES_TOTAL) {
-            if (nx >= ny && nx > 1) nx-- else if (ny > 1) ny-- else break
-        }
-        val (xs, tw) = axisTiles(w, inputWidth, nx)
-        val (ys, th) = axisTiles(h, inputHeight, ny)
+        val tPass1 = Perf.start()
+        val base = runOnce(full) ?: return emptyList()
+        Perf.log("refine-pass1", tPass1)
+        if (base.isEmpty()) return base
 
-        // Tile detections with boxes already remapped to full-frame coords;
-        // parallel origin metadata for the mask paste (x, y, tw, th).
-        val cand = ArrayList<Detection>(xs.size * ys.size * 2)
-        val org = ArrayList<IntArray>(xs.size * ys.size * 2)
-        for (y0 in ys) {
-            for (x0 in xs) {
-                val crop = Bitmap.createBitmap(full, x0, y0, tw, th)
-                val dets = runOnce(crop) ?: continue
-                for (d in dets) {
-                    val box = RectF(
-                        (d.boundingBox.left * tw + x0) / w,
-                        (d.boundingBox.top * th + y0) / h,
-                        (d.boundingBox.right * tw + x0) / w,
-                        (d.boundingBox.bottom * th + y0) / h,
-                    )
-                    cand.add(
-                        Detection(box, d.classId, d.confidence, d.label,
-                            d.maskCoefficients, d.maskBitmap)
-                    )
-                    org.add(intArrayOf(x0, y0, tw, th))
+        val consumed = BooleanArray(base.size)
+        val out = ArrayList<Detection>(base.size + REFINE_MAX)
+        val order = base.indices.sortedByDescending { base[it].confidence }
+            .take(REFINE_MAX)
+
+        for (bi in order) {
+            val b = base[bi]
+            val cr = cropRect(b.boundingBox, fw, fh) ?: continue
+            val cx = cr[0]
+            val cy = cr[1]
+            val cw = cr[2]
+            val ch = cr[3]
+            val tPass2 = Perf.start()
+            val crop = Bitmap.createBitmap(full, cx, cy, cw, ch)
+            val up = runOnce(crop) ?: continue
+            Perf.log("refine-pass2-crop", tPass2)
+
+            // Best same-class match to b = the same object, seen up close.
+            var bestIdx = -1
+            var bestIou = REFINE_MERGE_IOU
+            for (i in up.indices) {
+                if (up[i].classId != b.classId) continue
+                val io = iouNorm(
+                    remapBox(up[i].boundingBox, cx, cy, cw, ch, fw, fh),
+                    b.boundingBox,
+                )
+                if (io >= bestIou) { bestIou = io; bestIdx = i }
+            }
+
+            if (bestIdx >= 0) {
+                val r = up[bestIdx]
+                if (r.confidence >= b.confidence * REFINE_KEEP_CONF) {
+                    consumed[bi] = true
+                    out.add(withCropMask(
+                        Detection(
+                            remapBox(r.boundingBox, cx, cy, cw, ch, fw, fh),
+                            r.classId, r.confidence, r.label,
+                            r.maskCoefficients, r.maskBitmap,
+                        ),
+                        cx, cy, cw, ch, fw, fh,
+                    ))
                 }
             }
-        }
-        if (cand.isEmpty()) return emptyList()
 
-        // Greedy merge, highest confidence first: same class + enough box
-        // overlap = the same object seen from two tiles.
-        val order = (cand.indices).sortedByDescending { cand[it].confidence }
-        val clusters = ArrayList<MutableList<Int>>()
-        val clusterBox = ArrayList<RectF>()
-        val clusterClass = ArrayList<Int>()
-        for (idx in order) {
-            var placed = false
-            for (c in clusters.indices) {
-                if (clusterClass[c] == cand[idx].classId &&
-                    iouNorm(clusterBox[c], cand[idx].boundingBox) >= TILE_MERGE_IOU
-                ) {
-                    clusterBox[c].union(cand[idx].boundingBox)
-                    clusters[c].add(idx)
-                    placed = true
-                    break
+            // Extra objects visible ONLY in this crop: added when they don't
+            // duplicate anything already accepted.
+            for (i in up.indices) {
+                if (i == bestIdx) continue
+                val rb = remapBox(up[i].boundingBox, cx, cy, cw, ch, fw, fh)
+                if (rb.right <= rb.left || rb.bottom <= rb.top) continue
+                var duplicate = false
+                for (j in base.indices) {
+                    if (j == bi) continue
+                    if (base[j].classId == up[i].classId &&
+                        iouNorm(rb, base[j].boundingBox) >= REFINE_MERGE_IOU
+                    ) { duplicate = true; break }
                 }
-            }
-            if (!placed) {
-                clusters.add(ArrayList<Int>(2).apply { add(idx) })
-                clusterBox.add(RectF(cand[idx].boundingBox))
-                clusterClass.add(cand[idx].classId)
-            }
-        }
-
-        // Build the merged detections. Masks: paste every member's tile mask
-        // into a whole-frame canvas (whole-frame grid derived from the shared
-        // tile geometry, so every paste lands 1:1).
-        val out = ArrayList<Detection>(clusters.size)
-        for (c in clusters.indices) {
-            val members = clusters[c]
-            // First member is the highest-confidence (order is sorted) = rep.
-            val rep = cand[members[0]]
-            var maskOut: Bitmap? = null
-            val anyMask = members.firstOrNull { cand[it].maskBitmap != null }
-            if (anyMask != null) {
-                val mw = cand[anyMask].maskBitmap!!.width
-                val mh = cand[anyMask].maskBitmap!!.height
-                if (mw > 0 && mh > 0) {
-                    val fw = (mw * w + tw - 1) / tw
-                    val fh = (mh * h + th - 1) / th
-                    val buf = Bitmap.createBitmap(fw, fh, Bitmap.Config.ARGB_8888)
-                    val bc = Canvas(buf)
-                    for (mi in members) {
-                        val m = cand[mi].maskBitmap ?: continue
-                        val o = org[mi]
-                        val dx = (o[0] * mw) / o[2]
-                        val dy = (o[1] * mh) / o[3]
-                        // 1:1 paste (whole-frame grid scales identically) -
-                        // union by SRC_OVER: opaque interiors stay opaque.
-                        bc.drawBitmap(m, dx.toFloat(), dy.toFloat(), null)
+                if (!duplicate) {
+                    for (e in out) {
+                        if (e.classId == up[i].classId &&
+                            iouNorm(rb, e.boundingBox) >= REFINE_MERGE_IOU
+                        ) { duplicate = true; break }
                     }
-                    maskOut = buf
+                }
+                if (!duplicate) {
+                    out.add(withCropMask(
+                        Detection(rb, up[i].classId, up[i].confidence,
+                            up[i].label, up[i].maskCoefficients,
+                            up[i].maskBitmap),
+                        cx, cy, cw, ch, fw, fh,
+                    ))
                 }
             }
-            out.add(
-                Detection(clusterBox[c], rep.classId, rep.confidence, rep.label,
-                    rep.maskCoefficients, maskOut)
-            )
         }
-        Log.d(TAG, "split&detect: ${xs.size}x${ys.size} tiles -> " +
-            "${cand.size} tile dets -> ${out.size} merged")
+
+        // Everything not replaced keeps its pass-1 (baseline) version.
+        for (i in base.indices) if (!consumed[i]) out.add(base[i])
+
+        Log.d(TAG, "split&detect refine: ${order.size}/${base.size} dets " +
+            "refined -> ${out.size} total")
         return out
     }
 

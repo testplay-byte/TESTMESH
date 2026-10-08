@@ -1052,15 +1052,20 @@ class OverlayView @JvmOverloads constructor(
         val offsetY = (height - scaledH) / 2f
         val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
 
-        // PASS 1a - build stroke paths (also the tint clip) and per-mask
-        // content rects (bbox + feather margin) for the route decision.
+        // PASS 1a - build stroke paths (also the tint clip), the per-item
+        // mask rect (crop rect for split & detect refinements, full frame
+        // otherwise), and per-mask content rects (bbox + feather margin) for
+        // the route decision.
         val pathsPerItem = ArrayList<List<Path>>(items.size)
+        val maskRectsPerItem = ArrayList<RectF>(items.size)
         val contentRects = ArrayList<RectF>(items.size)
         for (item in items) {
             val mask = item.det.maskBitmap
+            val mRect = maskRectFor(item.det, maskRect)
+            maskRectsPerItem.add(mRect)
             val paths = if (mask != null && showSmoothOutline) {
                 item.chains.mapNotNull { chain ->
-                    if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
+                    if (chain.size >= 3) buildSmoothPath(chain, mRect) else null
                 }
             } else emptyList()
             pathsPerItem.add(paths)
@@ -1085,7 +1090,8 @@ class OverlayView @JvmOverloads constructor(
             for (i in items.indices) {
                 val mask = items[i].det.maskBitmap ?: continue
                 val classColor = DetectionStyle.colorFor(items[i].det.classId)
-                drawTintClipped(canvas, mask, maskRect, classColor, pathsPerItem[i])
+                drawTintClipped(canvas, mask, maskRectsPerItem[i], classColor,
+                    pathsPerItem[i])
             }
         } else {
             // COMPOSITE PATH - union blit at MASK_ALPHA: overlap regions can
@@ -1099,8 +1105,8 @@ class OverlayView @JvmOverloads constructor(
                 for (i in items.indices) {
                     val mask = items[i].det.maskBitmap ?: continue
                     val classColor = DetectionStyle.colorFor(items[i].det.classId)
-                    drawTintClipped(bc, mask, maskRect, classColor, pathsPerItem[i],
-                        fullAlpha = true)
+                    drawTintClipped(bc, mask, maskRectsPerItem[i], classColor,
+                        pathsPerItem[i], fullAlpha = true)
                 }
                 meshBlitPaint.alpha = MASK_ALPHA
                 blitSrcRect.set(Math.round(dirty.left), Math.round(dirty.top),
@@ -1161,6 +1167,23 @@ class OverlayView @JvmOverloads constructor(
             drawLabel(canvas, screenRect, det, classColor, anchorTop = screenRect.top)
         }
         Perf.log("overlay-onDraw", perfDrawT)
+    }
+
+    /**
+     * Screen rect covering [det]'s mask bitmap. Full-frame masks (default
+     * mask* fields) map over the whole frame rect; split & detect refine
+     * detections carry a crop rect, so their mask maps over just that window.
+     */
+    private fun maskRectFor(det: Detection, full: RectF): RectF {
+        if (det.maskLeft == 0f && det.maskTop == 0f &&
+            det.maskWidth == 1f && det.maskHeight == 1f
+        ) return full
+        return RectF(
+            full.left + det.maskLeft * full.width(),
+            full.top + det.maskTop * full.height(),
+            full.left + (det.maskLeft + det.maskWidth) * full.width(),
+            full.top + (det.maskTop + det.maskHeight) * full.height(),
+        )
     }
 
     /** True when any two rects intersect (the alpha-compounding condition). */
