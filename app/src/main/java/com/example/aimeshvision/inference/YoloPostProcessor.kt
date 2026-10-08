@@ -27,6 +27,14 @@ class YoloPostProcessor(
         // Stage 1A: this many detections get full-frame mask decode; the rest
         // fall back to bbox-only (full frame costs ~524k MACs per detection).
         private const val MAX_FULL_DECODE = 6
+
+        // MESH SPILL CUTOFF: after the smoothing blur, alpha below this is
+        // zeroed. One separable 3x3 pass spreads OUTSIDE the object by at
+        // most (255+0+0)/3 = 85, while genuine interior edge pixels start at
+        // 113 - so 96 provably removes the entire outside feather (the mesh
+        // visibly spilling past the hand: each mask px is ~8 screen px) while
+        // keeping every interior gradient pixel. Smoothing stays, spill goes.
+        private const val MESH_ALPHA_CUTOFF = 96
         private const val MASK_COEFFS = 32   // YOLO-seg prototype coefficient count
         private const val MIN_BOXES = 3      // a sane box tensor has >= 3 feature rows
     }
@@ -339,7 +347,10 @@ class YoloPostProcessor(
                 a0 = a1
             }
         }
-        // Vertical pass: tmp -> pix.
+        // Vertical pass: tmp -> pix. Also applies the spill cutoff: values
+        // below MESH_ALPHA_CUTOFF can only be outside-feather (max 85 after
+        // one pass) or sub-threshold noise - zeroing them snaps the tinted
+        // mesh edge back to the object boundary.
         for (x in 0 until w) {
             var a0 = tmp[x] ushr 24
             for (y in 0 until h) {
@@ -347,7 +358,7 @@ class YoloPostProcessor(
                 val a1 = tmp[i] ushr 24
                 val a2 = if (y + 1 < h) tmp[(y + 1) * w + x] ushr 24 else a1
                 val av = (a0 + a1 + a2) / 3
-                pix[i] = if (av > 0) (av shl 24) or 0x00FFFFFF else 0
+                pix[i] = if (av >= MESH_ALPHA_CUTOFF) (av shl 24) or 0x00FFFFFF else 0
                 a0 = a1
             }
         }
