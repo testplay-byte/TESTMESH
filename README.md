@@ -684,3 +684,27 @@ loop); release unsigned (no project keystore for this app — debug APK is
 the installable artifact); the dedicated builder sub-agent was
 safety-rejected mid-task, so the app was built in the main session
 (agent delivered the model asset download + the research report).
+
+
+## 📦 GitHub Releases (arm64-v8a only)
+
+Both apps build **arm64-v8a exclusively** (`ndk.abiFilters` in each
+`app/build.gradle.kts` — the only device family in use; re-add ABIs there
+if ever needed) and publish to the repository **Releases page** on version
+tags:
+
+| App | Tag pattern | Release asset | Notes |
+|---|---|---|---|
+| AIMESHVISION | `aimeshvision-v*` (e.g. `aimeshvision-v2.1`) | `AIMESHVISION-release.apk` | signed with the project keystore → installs as an **update** over existing installs |
+| MESHLABEL | `meshlabel-v*` (e.g. `meshlabel-v1.0`) | `MESHLABEL.apk` | this app has no release keystore → the asset is the **debug-key** build (installable) |
+
+Cutting a release (CI-only, no local builds):
+1. Bump `versionCode`/`versionName` in the app's `app/build.gradle.kts`
+   (AIMESHVISION: must increase `versionCode` for Play-style update
+   semantics), commit to `main`, CI green.
+2. `git tag aimeshvision-v2.1 && git push <remote> aimeshvision-v2.1`
+   (or `meshlabel-vX.Y`).
+3. The matching workflow runs tests + both variants, then
+   `softprops/action-gh-release@v2` creates the Release and attaches the
+   APK. Regular `main` pushes keep producing the usual CI artifacts
+   (`AIMESHVISION-debug/-release`, `MESHLABEL-debug/-release`).

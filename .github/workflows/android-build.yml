@@ -3,7 +3,14 @@ name: Android Build
 on:
   push:
     branches: [main]
+    # Releases: push a tag like aimeshvision-v2.1 to publish a GitHub
+    # Release with the signed APK attached (see the release steps below).
+    tags: ['aimeshvision-v*']
   workflow_dispatch:
+
+# Release creation needs to write (create release + upload asset).
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -56,3 +63,21 @@ jobs:
         with:
           name: AIMESHVISION-release
           path: AIMESHVISION/app/build/outputs/apk/release/app-release.apk
+
+      # ── GitHub Release (only on version tags) ────────────────────────────
+      # Publishes the SIGNED release APK (project keystore -> installs as
+      # an update over previously installed versions) with a clear filename.
+      - name: Name release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/AIMESHVISION-release.apk"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AIMESHVISION ${{ github.ref_name }}
+          files: AIMESHVISION-release.apk
+          body: |
+            AIMESHVISION ${{ github.ref_name }} — arm64-v8a only.
+            Signed with the project keystore (installs as an update).
+            Built by CI from `${{ github.sha }}`.

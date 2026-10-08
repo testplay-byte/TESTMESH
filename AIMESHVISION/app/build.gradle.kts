@@ -23,13 +23,16 @@ android {
         applicationId = "com.example.aimeshvision"
         minSdk = 31
         targetSdk = 36
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Prevent TFLite from stripping GPU delegate JNI libs
+        // arm64-v8a ONLY (user directive): the only device target in use.
+        // Keeps the TFLite GPU-delegate JNI libs for that ABI and drops
+        // armeabi-v7a/x86_64 (~third of the APK size). Re-add ABIs here
+        // if another device family is ever needed.
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+            abiFilters += listOf("arm64-v8a")
         }
     }
 

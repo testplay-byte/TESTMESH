@@ -3,7 +3,14 @@ name: MeshLabel Build
 on:
   push:
     branches: [main]
+    # Releases: push a tag like meshlabel-v1.0 to publish a GitHub Release
+    # with the APK attached (see the release steps below).
+    tags: ['meshlabel-v*']
   workflow_dispatch:
+
+# Release creation needs to write (create release + upload asset).
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -54,3 +61,22 @@ jobs:
         with:
           name: MESHLABEL-release
           path: MESHLABEL/app/build/outputs/apk/release/app-release*.apk
+
+      # ── GitHub Release (only on version tags) ────────────────────────────
+      # The release VARIANT of this app is UNSIGNED (no project keystore),
+      # so the installable asset is the DEBUG APK (debug-key signed).
+      - name: Name release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/MESHLABEL.apk"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MESHLABEL ${{ github.ref_name }}
+          files: MESHLABEL.apk
+          body: |
+            MESHLABEL ${{ github.ref_name }} — arm64-v8a only.
+            Installable debug-key build (this app ships without a release
+            keystore). LabelMe-style annotation + Magic Touch segmentation.
+            Built by CI from `${{ github.sha }}`.

@@ -15,6 +15,13 @@ android {
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // arm64-v8a ONLY (user directive, same as the sibling app):
+        // filters the MediaPipe tasks-vision JNI libs to the single device
+        // family in use - noticeably smaller APK.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
