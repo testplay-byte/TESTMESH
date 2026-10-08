@@ -62,6 +62,11 @@ class MainActivity : AppCompatActivity() {
         private const val PREF_SHOW_BOXES = "show_boxes"
         private const val PREF_SMOOTH = "smooth_outline"
         private const val PREF_TILE = "tile_inference"
+        // MESH & OUTLINE section (round 19): geometry knobs.
+        private const val PREF_SMOOTH_PASSES = "mesh_smooth_passes"
+        private const val PREF_RING_WIDTH = "ring_width_pct"
+        private const val PREF_OUTLINE_ALPHA = "outline_alpha_pct"
+        private const val PREF_MESH_ALPHA = "mesh_alpha_pct"
         private const val ASSET_MODEL = "model.tflite"
         private const val ASSET_LABELS = "labels.txt"
         private const val BUNDLED_MODEL_NAME = "bundled_model.tflite"
@@ -221,6 +226,11 @@ class MainActivity : AppCompatActivity() {
         overlayView.showBoxes = prefs.getBoolean(PREF_SHOW_BOXES, true)
         overlayView.showSmoothOutline = prefs.getBoolean(PREF_SMOOTH, false)
         modelManager.tileInferenceEnabled = prefs.getBoolean(PREF_TILE, false)
+        // MESH & OUTLINE knobs: stored as pct (except passes), applied live.
+        modelManager.meshSmoothPasses = prefs.getInt(PREF_SMOOTH_PASSES, 1)
+        modelManager.ringWidthScale = prefs.getInt(PREF_RING_WIDTH, 100) / 100f
+        overlayView.outlineAlpha = (prefs.getInt(PREF_OUTLINE_ALPHA, 100) * 255 + 50) / 100
+        overlayView.maskAlpha = (prefs.getInt(PREF_MESH_ALPHA, 43) * 255 + 50) / 100
 
         imagePagerAdapter = ImagePagerAdapter()
         imagePager.adapter = imagePagerAdapter
@@ -511,6 +521,14 @@ class MainActivity : AppCompatActivity() {
         val tvConfValue = view.findViewById<TextView>(R.id.tvConfValue)
         val sliderIou = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderIou)
         val tvIouValue = view.findViewById<TextView>(R.id.tvIouValue)
+        val sliderSmooth = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderSmooth)
+        val tvSmoothValue = view.findViewById<TextView>(R.id.tvSmoothValue)
+        val sliderRingWidth = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderRingWidth)
+        val tvRingWidthValue = view.findViewById<TextView>(R.id.tvRingWidthValue)
+        val sliderOutlineAlpha = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderOutlineAlpha)
+        val tvOutlineAlphaValue = view.findViewById<TextView>(R.id.tvOutlineAlphaValue)
+        val sliderMeshAlpha = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderMeshAlpha)
+        val tvMeshAlphaValue = view.findViewById<TextView>(R.id.tvMeshAlphaValue)
 
         toggleGpu.setCheckedSilent(useGpu)
 
@@ -558,6 +576,56 @@ class MainActivity : AppCompatActivity() {
             if (fromUser) {
                 modelManager.nmsIouThreshold = pct / 100f
                 prefs.edit().putFloat(PREF_IOU, pct / 100f).apply()
+            }
+        }
+
+        // MESH & OUTLINE: geometry knobs, persisted + applied live (decode
+        // reads them once per frame on the inference thread).
+        val smoothPasses = modelManager.meshSmoothPasses
+        sliderSmooth.value = smoothPasses.coerceIn(0, 2).toFloat()
+        tvSmoothValue.text = "$smoothPasses"
+        sliderSmooth.addOnChangeListener { _, value, fromUser ->
+            val v = value.toInt()
+            tvSmoothValue.text = "$v"
+            if (fromUser) {
+                modelManager.meshSmoothPasses = v
+                prefs.edit().putInt(PREF_SMOOTH_PASSES, v).apply()
+            }
+        }
+
+        val ringPct = (modelManager.ringWidthScale * 100).toInt()
+        sliderRingWidth.value = ringPct.coerceIn(50, 150).toFloat()
+        tvRingWidthValue.text = "$ringPct%"
+        sliderRingWidth.addOnChangeListener { _, value, fromUser ->
+            val pct = value.toInt()
+            tvRingWidthValue.text = "$pct%"
+            if (fromUser) {
+                modelManager.ringWidthScale = pct / 100f
+                prefs.edit().putInt(PREF_RING_WIDTH, pct).apply()
+            }
+        }
+
+        val outlinePct = (overlayView.outlineAlpha * 100 + 127) / 255
+        sliderOutlineAlpha.value = outlinePct.coerceIn(25, 100).toFloat()
+        tvOutlineAlphaValue.text = "$outlinePct%"
+        sliderOutlineAlpha.addOnChangeListener { _, value, fromUser ->
+            val pct = value.toInt()
+            tvOutlineAlphaValue.text = "$pct%"
+            if (fromUser) {
+                overlayView.outlineAlpha = (pct * 255 + 50) / 100
+                prefs.edit().putInt(PREF_OUTLINE_ALPHA, pct).apply()
+            }
+        }
+
+        val meshPct = (overlayView.maskAlpha * 100 + 127) / 255
+        sliderMeshAlpha.value = meshPct.coerceIn(10, 100).toFloat()
+        tvMeshAlphaValue.text = "$meshPct%"
+        sliderMeshAlpha.addOnChangeListener { _, value, fromUser ->
+            val pct = value.toInt()
+            tvMeshAlphaValue.text = "$pct%"
+            if (fromUser) {
+                overlayView.maskAlpha = (pct * 255 + 50) / 100
+                prefs.edit().putInt(PREF_MESH_ALPHA, pct).apply()
             }
         }
 

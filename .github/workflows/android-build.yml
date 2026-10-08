@@ -24,10 +24,17 @@ jobs:
       - name: Set up Gradle (with caching)
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
+      # Kotlin-native outline verification: MaskGeometryTest asserts the
+      # mesh/outline invariants (solidity, corners, straddle, adaptive
+      # width, speckles) against the shipped code - the gate that replaces
+      # ad-hoc Python image analysis. Fails the build on any regression.
+      - name: Unit tests (mesh/outline geometry)
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
 
       # Release variant uses the same committed keystore, so the APK installs
       # as an update over previous installs (stable signing key).

@@ -96,6 +96,14 @@ class ModelManager {
     @Volatile var tileInferenceEnabled: Boolean = false
     @Volatile var nmsIouThreshold: Float = DEFAULT_IOU
 
+    // Mesh/outline geometry knobs (settings sheet "MESH & OUTLINE" section),
+    // synced into the post-processor once per inference like conf/IoU.
+    /** Blur passes for the mesh smoothing filter (0 = raw, 1 = default, 2 = max). */
+    @Volatile var meshSmoothPasses: Int = 1
+
+    /** Outline width multiplier on the adaptive band (1.0 = default). */
+    @Volatile var ringWidthScale: Float = 1f
+
     private val postProcessor = YoloPostProcessor(
         confidenceThreshold, nmsIouThreshold, DEFAULT_MAX_RESULTS,
     )
@@ -321,6 +329,8 @@ class ModelManager {
 
             postProcessor.confidenceThreshold = confidenceThreshold
             postProcessor.nmsIouThreshold = nmsIouThreshold
+            postProcessor.meshSmoothPasses = meshSmoothPasses
+            postProcessor.ringWidthScale = ringWidthScale
 
             Perf.measure("infer-postprocess") {
                 postProcessor.postProcess(
