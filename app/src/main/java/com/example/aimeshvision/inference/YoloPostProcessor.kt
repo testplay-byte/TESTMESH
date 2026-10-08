@@ -34,7 +34,11 @@ class YoloPostProcessor(
         // 113 - so 96 provably removes the entire outside feather (the mesh
         // visibly spilling past the hand: each mask px is ~8 screen px) while
         // keeping every interior gradient pixel. Smoothing stays, spill goes.
-        private const val MESH_ALPHA_CUTOFF = 96
+        // 104 (was 96): a device test still saw slight spill at soft,
+        // low-confidence edges where interior blur values dip into the 96-104
+        // band. 104 stays provably below the interior edge start (113) and
+        // far above outside-feather max (85).
+        private const val MESH_ALPHA_CUTOFF = 104
         private const val MASK_COEFFS = 32   // YOLO-seg prototype coefficient count
         private const val MIN_BOXES = 3      // a sane box tensor has >= 3 feature rows
     }
