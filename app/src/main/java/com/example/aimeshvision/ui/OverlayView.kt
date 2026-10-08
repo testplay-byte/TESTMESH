@@ -843,6 +843,9 @@ class OverlayView @JvmOverloads constructor(
     /** Integer source rect scratch for the dirty-rect blit. */
     private val blitSrcRect = Rect()
 
+    /** Reused clip path: view rect minus all filled mesh contours. */
+    private val outsideClipPath = Path()
+
     /** Paint used to CLEAR only the dirty rect of the composite buffer. */
     private val clearPaint = Paint().apply {
         xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
@@ -944,9 +947,34 @@ class OverlayView @JvmOverloads constructor(
             }
         }
 
-        // PASS 3 - opaque strokes, then boxes/labels per item: the line stays
-        // at full strength OUTSIDE the mesh (contour offset by half the
-        // stroke width), one continuous border around the object.
+        // PASS 3a - OUTSIDE-ONLY STROKES. The stroke path follows the exact
+        // mesh boundary; the canvas is clipped to "everything except the
+        // filled mesh contours", so only the OUTER half of the stroke
+        // survives - one continuous border hugging the outside of the mesh,
+        // with no geometry distortion (and therefore no corner artifacts).
+        var anyStroke = false
+        for (paths in pathsPerItem) if (paths.isNotEmpty()) { anyStroke = true; break }
+        if (anyStroke) {
+            outsideClipPath.reset()
+            outsideClipPath.addRect(-4f, -4f, width + 4f, height + 4f,
+                Path.Direction.CW)
+            for (paths in pathsPerItem) {
+                for (p in paths) outsideClipPath.op(p, Path.Op.DIFFERENCE)
+            }
+            canvas.save()
+            canvas.clipPath(outsideClipPath)
+            for (i in items.indices) {
+                val paths = pathsPerItem[i]
+                if (paths.isEmpty()) continue
+                val classColor = DetectionStyle.colorFor(items[i].det.classId)
+                linePaint.color = DetectionStyle.vibrantFor(classColor)
+                linePaint.alpha = 255
+                for (p in paths) canvas.drawPath(p, linePaint)
+            }
+            canvas.restore()
+        }
+
+        // PASS 3b - boxes, corners, labels.
         for (i in items.indices) {
             val item = items[i]
             val det = item.det
@@ -957,13 +985,6 @@ class OverlayView @JvmOverloads constructor(
             val right = det.boundingBox.right * scaledW + offsetX
             val bottom = det.boundingBox.bottom * scaledH + offsetY
             val screenRect = RectF(left, top, right, bottom)
-
-            val paths = pathsPerItem[i]
-            if (paths.isNotEmpty()) {
-                linePaint.color = DetectionStyle.vibrantFor(classColor)
-                linePaint.alpha = 255
-                for (p in paths) canvas.drawPath(p, linePaint)
-            }
 
             // Labels are ALWAYS anchored to the box top - with boxes hidden
             // the chip shows exactly where it would appear with boxes shown
@@ -1067,35 +1088,6 @@ class OverlayView @JvmOverloads constructor(
      * contour point is represented exactly while the line between them is
      * smooth. Contours are closed by construction, so the path always closes.
      */
-    /**
-     * Shifts a screen-space closed polygon outward along per-point normals
-     * by [d] px. Direction comes from the polygon orientation (shoelace in
-     * y-down screen coords): positive area -> normal (ty, -tx) points away
-     * from the interior. Winding is canonicalized upstream, but the sign is
-     * computed here anyway so the helper is correct for any input.
-     * In-place on [pts] (x0,y0,x1,y1,...).
-     */
-    private fun offsetOutward(pts: FloatArray, n: Int, d: Float) {
-        var area2 = 0f
-        for (i in 0 until n) {
-            val j = (i + 1) % n
-            area2 += pts[i * 2] * pts[j * 2 + 1] - pts[j * 2] * pts[i * 2 + 1]
-        }
-        if (area2 == 0f) return
-        val sign = if (area2 > 0f) 1f else -1f
-        for (i in 0 until n) {
-            val pi = ((i - 1 + n) % n) * 2
-            val ni = ((i + 1) % n) * 2
-            val tx = pts[ni] - pts[pi]
-            val ty = pts[ni + 1] - pts[pi + 1]
-            val len = sqrt(tx * tx + ty * ty)
-            if (len < 1e-4f) continue
-            // Outward normal (screen y-down, positive shoelace): (ty, -tx).
-            pts[i * 2] += sign * (ty / len) * d
-            pts[i * 2 + 1] += -sign * (tx / len) * d
-        }
-    }
-
     private fun buildSmoothPath(
         dots: List<Pair<Float, Float>>, maskRect: RectF,
     ): Path {
@@ -1108,12 +1100,13 @@ class OverlayView @JvmOverloads constructor(
             pts[i * 2 + 1] = maskRect.top + dots[i].second * maskRect.height()
         }
 
-        // OUTSIDE BORDER: shift every point outward by half the stroke
-        // width so the stroke sits FULLY outside the mesh - its inner edge
-        // lands exactly on the mask boundary, producing one continuous
-        // line surrounding the object (the old centred stroke put half the
-        // line on the mesh, which read as messy on textured backgrounds).
-        offsetOutward(pts, n, LINE_STROKE_W / 2f)
+        // The stroke is made to sit OUTSIDE the mesh by CLIPPING it to the
+        // complement of the filled contour at draw time (see PASS 3), NOT by
+        // moving these points: offsetting each point along its own normal
+    // makes neighbouring normals cross at sharp corners, and the crossed
+        // polyline rendered as duplicated/looped line segments - the double
+        // line artifacts seen at edges. Keeping the geometry pristine and
+        // clipping instead is artifact-free by construction.
 
         val mids = FloatArray(n * 2)
         for (i in 0 until n) {
