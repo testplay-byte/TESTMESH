@@ -3,6 +3,7 @@ package com.example.aimeshvision.inference
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.RectF
+import com.example.aimeshvision.util.Perf
 import android.util.Log
 import org.tensorflow.lite.Interpreter
 import java.io.File
@@ -284,7 +285,7 @@ class ModelManager {
             lastPaddingY = (inputHeight - newH) / 2f
 
             val buffer = inputBuffer ?: return null
-            letterbox(bitmap, newW, newH, buffer)
+            Perf.measure("infer-letterbox") { letterbox(bitmap, newW, newH, buffer) }
 
             val (boxIdx, maskIdx) = locateOutputs()
             val boxShape = interp.getOutputTensor(boxIdx).shape()
@@ -303,23 +304,28 @@ class ModelManager {
                 boxIdx to outBox
             ).apply { outProto?.let { if (maskIdx != -1) put(maskIdx, it) } }
 
-            interp.runForMultipleInputsOutputs(inputs, outputs)
+            Perf.measure("infer-interpreter") {
+                interp.runForMultipleInputsOutputs(inputs, outputs)
+            }
             outBox.rewind()
             outProto?.rewind()
 
             postProcessor.confidenceThreshold = confidenceThreshold
             postProcessor.nmsIouThreshold = nmsIouThreshold
 
-            postProcessor.postProcess(
-                outBox, boxShape, outProto, protoShape,
-                inputWidth, inputHeight, lastPaddingX, lastPaddingY,
-                bitmap.width.toFloat(), bitmap.height.toFloat(),
-                classLabels,
-                // A prototype tensor present means YOLO-seg: the 32 trailing
-                // feature rows are mask coefficients, NOT class scores. Passing
-                // this explicitly beats guessing from the feature count alone.
-                expectMaskCoeffs = maskIdx != -1,
-            )
+            Perf.measure("infer-postprocess") {
+                postProcessor.postProcess(
+                    outBox, boxShape, outProto, protoShape,
+                    inputWidth, inputHeight, lastPaddingX, lastPaddingY,
+                    bitmap.width.toFloat(), bitmap.height.toFloat(),
+                    classLabels,
+                    // A prototype tensor present means YOLO-seg: the 32
+                    // trailing feature rows are mask coefficients, NOT class
+                    // scores. Passing this explicitly beats guessing from the
+                    // feature count alone.
+                    expectMaskCoeffs = maskIdx != -1,
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Inference run failed", e)
             null

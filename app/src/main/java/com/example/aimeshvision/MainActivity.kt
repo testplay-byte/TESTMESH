@@ -28,6 +28,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.viewpager2.widget.ViewPager2
 import com.example.aimeshvision.inference.Detection
+import com.example.aimeshvision.util.Perf
 import com.example.aimeshvision.inference.InferenceEngine
 import com.example.aimeshvision.inference.ModelManager
 import com.example.aimeshvision.ui.ImagePagerAdapter
@@ -388,6 +389,7 @@ class MainActivity : AppCompatActivity() {
             }
             val startTime = System.currentTimeMillis()
             try {
+                val tRotate = Perf.start()
                 val rotation = image.imageInfo.rotationDegrees
                 val rotated = image.toBitmap().let { bmp ->
                     android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }.let { m ->
@@ -395,8 +397,11 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 image.close()
+                Perf.log("camera-rotate", tRotate)
 
+                val tInfer = Perf.start()
                 val results = modelManager.runInference(rotated)
+                Perf.log("model-runInference", tInfer)
                 val latency = System.currentTimeMillis() - startTime
 
                 engine.onMain {

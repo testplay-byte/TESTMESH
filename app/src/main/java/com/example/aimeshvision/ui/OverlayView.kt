@@ -9,10 +9,13 @@ import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.RectF
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.View
 import com.example.aimeshvision.inference.Detection
+import com.example.aimeshvision.util.Perf
+import android.graphics.PorterDuffXfermode
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -65,6 +68,10 @@ class OverlayView @JvmOverloads constructor(
         private const val LABEL_PADDING = 10f
         private const val LABEL_CORNER_R = 14f
         private const val MASK_ALPHA = 110
+
+        // Screen px added around each bbox when computing mask content rects
+        // (decode feather + minor spill) for the overlap fast-path test.
+        private const val CONTENT_PAD_PX = 24f
 
         // ── contour extraction ───────────────────────────────────────────
         // Ignore tiny blobs: below this many solid pixels a component is
@@ -135,8 +142,6 @@ class OverlayView @JvmOverloads constructor(
         val det: Detection,
         /** One outline per chain, normalized 0..1 in mask space (may be empty). */
         val chains: List<List<Pair<Float, Float>>>,
-        /** Smoothed top edge of the silhouette, normalized 0..1 (null = none). */
-        val labelAnchorNorm: Float?,
     )
 
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -184,7 +189,6 @@ class OverlayView @JvmOverloads constructor(
     // instance; unmatched detections render raw.
     private class Track(
         val points: Array<Pair<Float, Float>>,
-        var labelAnchor: Float?,
     )
 
     private class InstanceTrack(
@@ -202,10 +206,25 @@ class OverlayView @JvmOverloads constructor(
 
     /** Called once per inference result: precomputes geometry, then redraws. */
     fun setResults(results: List<Detection>, inputWidth: Int, inputHeight: Int) {
+        val perfT = Perf.start()
         sourceImageWidth = inputWidth
         sourceImageHeight = inputHeight
 
         frameCounter++
+
+        // PERF GATE: contours (flood fill, trace, DP, resample, EMA) are only
+        // ever consumed by the outline. With the outline off they were still
+        // running for every detection on the MAIN thread every frame - the
+        // biggest avoidable UI cost. Skip all of it and reset temporal state
+        // so re-enabling the outline starts clean (one raw frame, then EMA).
+        if (!showSmoothOutline) {
+            instances.clear()
+            val plain = ArrayList<PreparedItem>(results.size)
+            for (det in results) plain.add(PreparedItem(det, emptyList()))
+            prepared = plain
+            invalidate()
+            return
+        }
 
         // Match current detections to previous-frame instances by IoU.
         val matched = BooleanArray(instances.size)
@@ -232,7 +251,6 @@ class OverlayView @JvmOverloads constructor(
         for (det in results) {
             val mask = det.maskBitmap
             var chains: List<List<Pair<Float, Float>>> = emptyList()
-            var anchor: Float? = null
 
             // Any matched detection keeps its instance alive, even when mask
             // decode failed this frame (prevents EMA state reset flicker).
@@ -268,13 +286,8 @@ class OverlayView @JvmOverloads constructor(
                         primaryGateOk -> emaSoft(primaryPrev!!, primary)
                         else -> emaSoft(primaryPrev!!, primary, RAW_BIAS_ON_GATE_MISS)
                     }
-                    anchor = if (inst != null && primaryLenMatch) {
-                        emaAnchor(inst, primarySmoothed)
-                    } else primarySmoothed.minOfOrNull { it.second }
                     outContours.add(primarySmoothed)
-                    // Store the smoothed anchor so emaAnchor has a previous
-                    // value next frame (it was never assigned before).
-                    nextTracks.add(Track(primarySmoothed.toTypedArray(), anchor))
+                    nextTracks.add(Track(primarySmoothed.toTypedArray()))
 
                     // Secondary blobs: match each to the nearest UNUSED previous
                     // secondary track by first-point distance (NOT by sorted
@@ -308,7 +321,7 @@ class OverlayView @JvmOverloads constructor(
                         }
                         outContours.add(smoothed)
                         if (ci <= MAX_SECONDARY_EMA) {
-                            nextTracks.add(Track(smoothed.toTypedArray(), null))
+                            nextTracks.add(Track(smoothed.toTypedArray()))
                         }
                     }
                     chains = outContours
@@ -332,7 +345,7 @@ class OverlayView @JvmOverloads constructor(
                     assignments[det]!!.lastFrame = frameCounter
                 }
             }
-            items.add(PreparedItem(det, chains, anchor))
+            items.add(PreparedItem(det, chains))
         }
 
         // Expire instances not seen for GRACE_FRAMES consecutive setResults
@@ -341,6 +354,7 @@ class OverlayView @JvmOverloads constructor(
         instances.removeAll { frameCounter - it.lastFrame > GRACE_FRAMES }
         prepared = items
         invalidate()
+        Perf.log("overlay-setResults", perfT)
     }
 
     fun clear() {
@@ -803,18 +817,6 @@ class OverlayView @JvmOverloads constructor(
         return out
     }
 
-    /** EMA-blends the label anchor (top edge Y, normalized) across frames. */
-    private fun emaAnchor(inst: InstanceTrack, dots: List<Pair<Float, Float>>?): Float? {
-        val raw = dots?.minOfOrNull { it.second } ?: return null
-        val prev = inst.track?.labelAnchor
-        val smoothed = if (prev == null || abs(raw - prev) > MAX_TRACK_DISTANCE) {
-            raw
-        } else {
-            prev + (raw - prev) * (1f - SMOOTHING)
-        }
-        return smoothed
-    }
-
     /** IoU of two normalized bounding boxes (instance matching). */
     private fun iouOf(a: android.graphics.RectF, b: android.graphics.RectF): Float {
         val left = maxOf(a.left, b.left)
@@ -838,8 +840,21 @@ class OverlayView @JvmOverloads constructor(
     private var meshBitmap: Bitmap? = null
     private var meshCanvas: Canvas? = null
     private val meshBlitPaint = Paint()
+    /** Integer source rect scratch for the dirty-rect blit. */
+    private val blitSrcRect = Rect()
 
-    private fun meshBuffer(): Canvas {
+    /** Paint used to CLEAR only the dirty rect of the composite buffer. */
+    private val clearPaint = Paint().apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+    }
+
+    /**
+     * Returns the composite buffer, cleared ONLY inside [dirty] (perf: the
+     * old version cleared the full ~10 MB screen buffer every frame even when
+     * a single small object was on screen). Buffer is screen-sized, reused,
+     * and recreated only on view-size change.
+     */
+    private fun meshBuffer(dirty: RectF): Canvas {
         val w = width.coerceAtLeast(1)
         val h = height.coerceAtLeast(1)
         val existing = meshBitmap
@@ -848,7 +863,7 @@ class OverlayView @JvmOverloads constructor(
             meshBitmap = b
             meshCanvas = Canvas(b)
         }
-        meshCanvas!!.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        meshCanvas!!.drawRect(dirty, clearPaint)
         return meshCanvas!!
     }
 
@@ -858,6 +873,7 @@ class OverlayView @JvmOverloads constructor(
         // or pathsPerItem[i] could pair with a different item if setResults
         // ever runs off the main thread (currently main-confined by caller
         // discipline only).
+        val perfDrawT = Perf.start()
         val items = prepared
         if (items.isEmpty()) return
 
@@ -871,16 +887,12 @@ class OverlayView @JvmOverloads constructor(
         val offsetY = (height - scaledH) / 2f
         val maskRect = RectF(offsetX, offsetY, offsetX + scaledW, offsetY + scaledH)
 
-        // PASS 1 - compose every mask into the offscreen buffer at FULL
-        // alpha, each clipped to its own contour (closed by construction).
-        // Successive clipPath calls INTERSECT, so clip+draw PER path.
-        val bc = meshBuffer()
-        // Stroke paths are built here and cached for PASS 3.
+        // PASS 1a - build stroke paths (also the tint clip) and per-mask
+        // content rects (bbox + feather margin) for the route decision.
         val pathsPerItem = ArrayList<List<Path>>(items.size)
-        var drewAnyMask = false
+        val contentRects = ArrayList<RectF>(items.size)
         for (item in items) {
             val mask = item.det.maskBitmap
-            val classColor = DetectionStyle.colorFor(item.det.classId)
             val paths = if (mask != null && showSmoothOutline) {
                 item.chains.mapNotNull { chain ->
                     if (chain.size >= 3) buildSmoothPath(chain, maskRect) else null
@@ -888,35 +900,48 @@ class OverlayView @JvmOverloads constructor(
             } else emptyList()
             pathsPerItem.add(paths)
             if (mask == null) continue
-
-            if (paths.isEmpty()) {
-                // Outline off or no contour: full mask.
-                drewAnyMask = true
-                drawMaskFullAlpha(bc, mask, maskRect, classColor)
-            } else {
-                val sane = paths.filter { isSaneClipPath(it, maskRect) }
-                if (sane.isEmpty()) {
-                    drewAnyMask = true
-                    drawMaskFullAlpha(bc, mask, maskRect, classColor)
-                } else {
-                    drewAnyMask = true
-                    for (p in sane) {
-                        val save = bc.save()
-                        bc.clipPath(p)
-                        drawMaskFullAlpha(bc, mask, maskRect, classColor)
-                        bc.restoreToCount(save)
-                    }
-                }
-            }
+            val det = item.det
+            contentRects.add(RectF(
+                det.boundingBox.left * scaledW + offsetX - CONTENT_PAD_PX,
+                det.boundingBox.top * scaledH + offsetY - CONTENT_PAD_PX,
+                det.boundingBox.right * scaledW + offsetX + CONTENT_PAD_PX,
+                det.boundingBox.bottom * scaledH + offsetY + CONTENT_PAD_PX,
+            ))
         }
 
-        // PASS 2 - ONE translucent blit: alpha applied once to the union of
-        // all masks, so translucency is uniform no matter how many objects
-        // overlap (the old per-instance 110-alpha draws compounded in
-        // overlap regions and read as solid).
-        if (drewAnyMask) {
-            meshBlitPaint.alpha = MASK_ALPHA
-            canvas.drawBitmap(meshBitmap!!, 0f, 0f, meshBlitPaint)
+        // PASS 1b - ROUTE DECISION. Alpha compounding only happens where two
+        // masks OVERLAP; a non-overlapping set drawn directly at MASK_ALPHA is
+        // pixel-equivalent to the composite result, so the offscreen buffer
+        // (10 MB clear + full-screen blit every frame) is only paid for when
+        // it is needed - the "many objects crowd together" case.
+        val overlaps = haveOverlap(contentRects)
+        if (contentRects.isEmpty() || !overlaps) {
+            // FAST PATH - direct translucent draws, zero offscreen work.
+            for (i in items.indices) {
+                val mask = items[i].det.maskBitmap ?: continue
+                val classColor = DetectionStyle.colorFor(items[i].det.classId)
+                drawTintClipped(canvas, mask, maskRect, classColor, pathsPerItem[i])
+            }
+        } else {
+            // COMPOSITE PATH - union blit at MASK_ALPHA: overlap regions can
+            // never compound toward opacity (the ten-hands solid-mesh bug).
+            val dirty = unionRect(contentRects)
+            if (!dirty.intersect(0f, 0f, width.toFloat(), height.toFloat())) {
+                // nothing visible on screen
+            } else {
+                val bc = meshBuffer(dirty)
+                bc.clipRect(dirty)
+                for (i in items.indices) {
+                    val mask = items[i].det.maskBitmap ?: continue
+                    val classColor = DetectionStyle.colorFor(items[i].det.classId)
+                    drawTintClipped(bc, mask, maskRect, classColor, pathsPerItem[i],
+                        fullAlpha = true)
+                }
+                meshBlitPaint.alpha = MASK_ALPHA
+                blitSrcRect.set(Math.round(dirty.left), Math.round(dirty.top),
+                    Math.round(dirty.right), Math.round(dirty.bottom))
+                canvas.drawBitmap(meshBitmap!!, blitSrcRect, dirty, meshBlitPaint)
+            }
         }
 
         // PASS 3 - opaque strokes, then boxes/labels per item: the line stays
@@ -940,19 +965,62 @@ class OverlayView @JvmOverloads constructor(
                 for (p in paths) canvas.drawPath(p, linePaint)
             }
 
+            // Labels are ALWAYS anchored to the box top - with boxes hidden
+            // the chip shows exactly where it would appear with boxes shown
+            // (the old silhouette-anchor placement here was removed on user
+            // request; boundingBox is available even when the box is not
+            // drawn).
             if (showBoxes) {
                 boxPaint.color = classColor
                 boxPaint.alpha = 190
                 canvas.drawRect(screenRect, boxPaint)
                 drawCorners(canvas, screenRect, classColor)
-                drawLabel(canvas, screenRect, det, classColor, anchorTop = screenRect.top)
-            } else {
-                // No box: anchor the label to the smoothed top edge of the
-                // actual object silhouette so it sits ON the object.
-                val anchorTop = item.labelAnchorNorm?.let { offsetY + it * scaledH }
-                    ?: screenRect.top
-                drawLabel(canvas, screenRect, det, classColor, anchorTop = anchorTop)
             }
+            drawLabel(canvas, screenRect, det, classColor, anchorTop = screenRect.top)
+        }
+        Perf.log("overlay-onDraw", perfDrawT)
+    }
+
+    /** True when any two rects intersect (the alpha-compounding condition). */
+    private fun haveOverlap(rects: List<RectF>): Boolean {
+        for (i in rects.indices) for (j in i + 1 until rects.size) {
+            if (RectF.intersects(rects[i], rects[j])) return true
+        }
+        return false
+    }
+
+    /** Bounding union of a non-empty rect list (new instance). */
+    private fun unionRect(rects: List<RectF>): RectF {
+        val u = RectF(rects[0])
+        for (i in 1 until rects.size) u.union(rects[i])
+        return u
+    }
+
+    /**
+     * Draws one mask tinted with the class colour, optionally clipped to its
+     * outline paths (tint stays inside the outline when one exists; clipPath
+     * calls INTERSECT so each path gets save/clip/draw/restore).
+     *
+     * @param fullAlpha true = write at full alpha for the composite route,
+     *        which applies MASK_ALPHA once at blit time; false = apply
+     *        MASK_ALPHA directly (fast route).
+     */
+    private fun drawTintClipped(
+        canvas: Canvas, mask: Bitmap, maskRect: RectF, classColor: Int,
+        paths: List<Path>, fullAlpha: Boolean = false,
+    ) {
+        maskPaint.colorFilter = colorFilterFor(classColor)
+        maskPaint.alpha = if (fullAlpha) 255 else MASK_ALPHA
+        val sane = paths.filter { isSaneClipPath(it, maskRect) }
+        if (sane.isEmpty()) {
+            canvas.drawBitmap(mask, null, maskRect, maskPaint)
+            return
+        }
+        for (p in sane) {
+            val save = canvas.save()
+            canvas.clipPath(p)
+            canvas.drawBitmap(mask, null, maskRect, maskPaint)
+            canvas.restoreToCount(save)
         }
     }
 
@@ -992,20 +1060,6 @@ class OverlayView @JvmOverloads constructor(
 
     /** Class id -> uppercase label (avoids per-frame string churn). */
     private val labelCache = HashMap<Int, String>()
-
-    /**
-     * Draws one mask at FULL alpha (colour baked) into the offscreen
-     * composite buffer. Translucency is applied later by the single blit -
-     * see [meshBuffer]. Never draw masks at MASK_ALPHA directly: overlapping
-     * instances compound alpha and turn the mesh solid.
-     */
-    private fun drawMaskFullAlpha(
-        canvas: Canvas, mask: Bitmap, maskRect: RectF, classColor: Int,
-    ) {
-        maskPaint.colorFilter = colorFilterFor(classColor)
-        maskPaint.alpha = 255
-        canvas.drawBitmap(mask, null, maskRect, maskPaint)
-    }
 
     /**
      * Builds the smooth CLOSED path through the resampled contour: on-curve
