@@ -961,7 +961,7 @@ class OverlayView @JvmOverloads constructor(
             for (paths in pathsPerItem) {
                 for (p in paths) outsideClipPath.op(p, Path.Op.DIFFERENCE)
             }
-            canvas.save()
+            val strokeSave = canvas.save()
             canvas.clipPath(outsideClipPath)
             for (i in items.indices) {
                 val paths = pathsPerItem[i]
@@ -971,7 +971,7 @@ class OverlayView @JvmOverloads constructor(
                 linePaint.alpha = 255
                 for (p in paths) canvas.drawPath(p, linePaint)
             }
-            canvas.restore()
+            canvas.restoreToCount(strokeSave)
         }
 
         // PASS 3b - boxes, corners, labels.
