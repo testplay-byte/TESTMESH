@@ -60,6 +60,7 @@ class MainActivity : AppCompatActivity() {
         private const val PREF_IOU = "iou_threshold"
         private const val PREF_SHOW_BOXES = "show_boxes"
         private const val PREF_SMOOTH = "smooth_outline"
+        private const val PREF_TILE = "tile_inference"
         private const val ASSET_MODEL = "model.tflite"
         private const val ASSET_LABELS = "labels.txt"
         private const val BUNDLED_MODEL_NAME = "bundled_model.tflite"
@@ -218,6 +219,7 @@ class MainActivity : AppCompatActivity() {
         updateModelNameHeader()
         overlayView.showBoxes = prefs.getBoolean(PREF_SHOW_BOXES, true)
         overlayView.showSmoothOutline = prefs.getBoolean(PREF_SMOOTH, false)
+        modelManager.tileInferenceEnabled = prefs.getBoolean(PREF_TILE, false)
 
         imagePagerAdapter = ImagePagerAdapter()
         imagePager.adapter = imagePagerAdapter
@@ -517,6 +519,14 @@ class MainActivity : AppCompatActivity() {
         toggleSmooth.onCheckedChangeListener = { checked ->
             overlayView.showSmoothOutline = checked
             prefs.edit().putBoolean(PREF_SMOOTH, checked).apply()
+        }
+
+        // Split & detect: persisted, applied to the engine live (next frame).
+        val toggleTile = view.findViewById<IOSToggle>(R.id.toggleTile)
+        toggleTile.setCheckedSilent(modelManager.tileInferenceEnabled)
+        toggleTile.onCheckedChangeListener = { checked ->
+            modelManager.tileInferenceEnabled = checked
+            prefs.edit().putBoolean(PREF_TILE, checked).apply()
         }
 
         // F10 fixed: confidence + IoU are user-adjustable, persisted, and applied live.

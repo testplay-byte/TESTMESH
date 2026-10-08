@@ -2,6 +2,7 @@ package com.example.aimeshvision.inference
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.RectF
 import android.util.Log
 import org.tensorflow.lite.Interpreter
 import java.io.File
@@ -38,6 +39,17 @@ class ModelManager {
         const val DEFAULT_CONFIDENCE = 0.35f
         const val DEFAULT_IOU = 0.45f
         const val DEFAULT_MAX_RESULTS = 20
+
+        // Split & detect (tiled inference): overlap between adjacent tiles in
+        // SOURCE pixels, and a hard cap on total tiles per frame so latency
+        // stays bounded (tile axes shrink / tiles grow to fit).
+        private const val TILE_OVERLAP = 128
+        private const val MAX_TILES_TOTAL = 12
+        // Cross-tile merge: two detections of the same class whose boxes
+        // overlap at least this much are treated as the SAME object seen from
+        // two tiles (typical split-across-seam IoU ~0.3-0.6; two distinct
+        // adjacent objects rarely reach 0.15).
+        private const val TILE_MERGE_IOU = 0.15f
     }
 
     private var interpreter: Interpreter? = null
@@ -63,6 +75,15 @@ class ModelManager {
 
     /** User-adjustable inference knobs (settings sheet). */
     @Volatile var confidenceThreshold: Float = DEFAULT_CONFIDENCE
+
+    /**
+     * Split & detect: when on, frames larger than the model input are cut
+     * into overlapping tiles, each inferred at full model resolution, then
+     * remapped and merged back to whole-frame detections. Catches small
+     * objects the single-pass downscale would swallow, at tile-count x the
+     * latency - opt-in from settings.
+     */
+    @Volatile var tileInferenceEnabled: Boolean = false
     @Volatile var nmsIouThreshold: Float = DEFAULT_IOU
 
     private val postProcessor = YoloPostProcessor(
@@ -217,6 +238,23 @@ class ModelManager {
      */
     fun runInference(bitmap: Bitmap): List<Detection> {
         if (closed.get()) return emptyList()
+
+        // Split & detect: only worth tiling when the frame exceeds the model
+        // input on at least one axis.
+        if (tileInferenceEnabled &&
+            (bitmap.width > inputWidth || bitmap.height > inputHeight)
+        ) {
+            var tiled = runTiledPass(bitmap)
+            if (tiled.isNotEmpty() || !usedGpu) return tiled
+            // GPU died mid-tiling -> reload on CPU and redo once (F6 parity
+            // with the single-pass path).
+            Log.w(TAG, "GPU tiled inference failed - falling back to CPU")
+            onGpuFallback?.invoke("GPU error - switched to CPU")
+            val file = currentModelFile ?: return tiled
+            if (!loadModel(file, useGpu = false)) return tiled
+            return runTiledPass(bitmap)
+        }
+
         val attempt = runOnce(bitmap)
         if (attempt != null || !usedGpu) return attempt ?: emptyList()
 
@@ -343,6 +381,166 @@ class ModelManager {
             }
         }
         buffer.rewind()
+    }
+
+    // ── split & detect: tiled inference ──────────────────────────────────────
+
+    /**
+     * Axis tiling: split [dim] into [cap] segments covered by tiles of at
+     * least size [t] with >= [TILE_OVERLAP] overlap. Returns (starts, size).
+     * When the natural count at size [t] exceeds [cap] (huge frames), tiles
+     * GROW so [cap] tiles still cover the whole axis with overlap - the model
+     * then sees each tile at a better scale than the single full-frame pass.
+     */
+    private fun axisTiles(dim: Int, t: Int, cap: Int): Pair<List<Int>, Int> {
+        if (dim <= t) return listOf(0) to dim
+        val ov = TILE_OVERLAP
+        val stride = t - ov
+        // Natural count at tile size t.
+        var n = (dim - t + stride - 1) / stride + 1
+        if (n > cap) n = cap
+        if (n < 1) n = 1
+        // Size that lets n tiles cover dim with >= ov overlap:
+        //   n*size - (n-1)*ov >= dim  ->  size >= (dim + ov*(n-1)) / n
+        val size = maxOf(t, (dim + ov * (n - 1) + n - 1) / n)
+        val s2 = size - ov
+        val starts = ArrayList<Int>(n)
+        for (k in 0 until n) starts.add(minOf(k * s2, dim - size))
+        return starts to size
+    }
+
+    /** Natural tile count for an axis (for the total-budget calculation). */
+    private fun naturalCount(dim: Int, t: Int): Int {
+        if (dim <= t) return 1
+        val stride = t - TILE_OVERLAP
+        return (dim - t + stride - 1) / stride + 1
+    }
+
+    /** IoU of two normalized boxes (cross-tile merge). */
+    private fun iouNorm(a: RectF, b: RectF): Float {
+        val left = maxOf(a.left, b.left)
+        val top = maxOf(a.top, b.top)
+        val right = minOf(a.right, b.right)
+        val bottom = minOf(a.bottom, b.bottom)
+        val inter = maxOf(0f, right - left) * maxOf(0f, bottom - top)
+        val union = (a.right - a.left) * (a.bottom - a.top) +
+            (b.right - b.left) * (b.bottom - b.top) - inter
+        return if (union <= 0f) 0f else inter / union
+    }
+
+    /**
+     * One tiled pass: grid over the frame (overlap >= [TILE_OVERLAP], total
+     * tiles <= [MAX_TILES_TOTAL]), infer each tile at full model resolution,
+     * remap boxes to whole-frame normalized coordinates, then greedily merge
+     * cross-tile duplicates (same class, box IoU >= [TILE_MERGE_IOU]) into
+     * one detection with the union box and the union mask (pasted at the
+     * owner tile's offset into a whole-frame mask canvas).
+     *
+     * Never throws: failed tiles are skipped, an all-empty result with the
+     * GPU active is treated as a GPU failure by the caller.
+     */
+    private fun runTiledPass(full: Bitmap): List<Detection> {
+        val w = full.width
+        val h = full.height
+        if (interpreter == null || closed.get()) return emptyList()
+
+        // Total-tile budget: shrink the longer axis first, then the other.
+        var nx = naturalCount(w, inputWidth)
+        var ny = naturalCount(h, inputHeight)
+        while (nx * ny > MAX_TILES_TOTAL) {
+            if (nx >= ny && nx > 1) nx-- else if (ny > 1) ny-- else break
+        }
+        val (xs, tw) = axisTiles(w, inputWidth, nx)
+        val (ys, th) = axisTiles(h, inputHeight, ny)
+
+        // Tile detections with boxes already remapped to full-frame coords;
+        // parallel origin metadata for the mask paste (x, y, tw, th).
+        val cand = ArrayList<Detection>(xs.size * ys.size * 2)
+        val org = ArrayList<IntArray>(xs.size * ys.size * 2)
+        for (y0 in ys) {
+            for (x0 in xs) {
+                val crop = Bitmap.createBitmap(full, x0, y0, tw, th)
+                val dets = runOnce(crop) ?: continue
+                for (d in dets) {
+                    val box = RectF(
+                        (d.boundingBox.left * tw + x0) / w,
+                        (d.boundingBox.top * th + y0) / h,
+                        (d.boundingBox.right * tw + x0) / w,
+                        (d.boundingBox.bottom * th + y0) / h,
+                    )
+                    cand.add(
+                        Detection(box, d.classId, d.confidence, d.label,
+                            d.maskCoefficients, d.maskBitmap)
+                    )
+                    org.add(intArrayOf(x0, y0, tw, th))
+                }
+            }
+        }
+        if (cand.isEmpty()) return emptyList()
+
+        // Greedy merge, highest confidence first: same class + enough box
+        // overlap = the same object seen from two tiles.
+        val order = (cand.indices).sortedByDescending { cand[it].confidence }
+        val clusters = ArrayList<MutableList<Int>>()
+        val clusterBox = ArrayList<RectF>()
+        val clusterClass = ArrayList<Int>()
+        for (idx in order) {
+            var placed = false
+            for (c in clusters.indices) {
+                if (clusterClass[c] == cand[idx].classId &&
+                    iouNorm(clusterBox[c], cand[idx].boundingBox) >= TILE_MERGE_IOU
+                ) {
+                    clusterBox[c].union(cand[idx].boundingBox)
+                    clusters[c].add(idx)
+                    placed = true
+                    break
+                }
+            }
+            if (!placed) {
+                clusters.add(ArrayList<Int>(2).apply { add(idx) })
+                clusterBox.add(RectF(cand[idx].boundingBox))
+                clusterClass.add(cand[idx].classId)
+            }
+        }
+
+        // Build the merged detections. Masks: paste every member's tile mask
+        // into a whole-frame canvas (whole-frame grid derived from the shared
+        // tile geometry, so every paste lands 1:1).
+        val out = ArrayList<Detection>(clusters.size)
+        for (c in clusters.indices) {
+            val members = clusters[c]
+            // First member is the highest-confidence (order is sorted) = rep.
+            val rep = cand[members[0]]
+            var maskOut: Bitmap? = null
+            val anyMask = members.firstOrNull { cand[it].maskBitmap != null }
+            if (anyMask != null) {
+                val mw = cand[anyMask].maskBitmap!!.width
+                val mh = cand[anyMask].maskBitmap!!.height
+                if (mw > 0 && mh > 0) {
+                    val fw = (mw * w + tw - 1) / tw
+                    val fh = (mh * h + th - 1) / th
+                    val buf = Bitmap.createBitmap(fw, fh, Bitmap.Config.ARGB_8888)
+                    val bc = Canvas(buf)
+                    for (mi in members) {
+                        val m = cand[mi].maskBitmap ?: continue
+                        val o = org[mi]
+                        val dx = (o[0] * mw) / o[2]
+                        val dy = (o[1] * mh) / o[3]
+                        // 1:1 paste (whole-frame grid scales identically) -
+                        // union by SRC_OVER: opaque interiors stay opaque.
+                        bc.drawBitmap(m, dx.toFloat(), dy.toFloat(), null)
+                    }
+                    maskOut = buf
+                }
+            }
+            out.add(
+                Detection(clusterBox[c], rep.classId, rep.confidence, rep.label,
+                    rep.maskCoefficients, maskOut)
+            )
+        }
+        Log.d(TAG, "split&detect: ${xs.size}x${ys.size} tiles -> " +
+            "${cand.size} tile dets -> ${out.size} merged")
+        return out
     }
 
     /**

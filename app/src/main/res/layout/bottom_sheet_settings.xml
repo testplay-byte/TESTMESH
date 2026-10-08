@@ -115,6 +115,31 @@
             android:layout_height="wrap_content"/>
     </LinearLayout>
 
+    <!-- Split & detect: tiled inference (SLOW, more detail) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_glass_btn"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="8dp"
+        android:layout_marginTop="6dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Split &amp; Detect (slow, more detail)"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"/>
+
+        <com.example.aimeshvision.ui.IOSToggle
+            android:id="@+id/toggleTile"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"/>
+    </LinearLayout>
+
     <!-- ── HARDWARE: compact toggle row ──────────────────────────────────── -->
     <TextView
         android:layout_width="wrap_content"
