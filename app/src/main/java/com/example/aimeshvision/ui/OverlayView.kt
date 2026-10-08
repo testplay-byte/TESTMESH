@@ -71,15 +71,27 @@ class OverlayView @JvmOverloads constructor(
         // mask noise, not an object outline.
         private const val MIN_CONTOUR_PX = 12
 
-        // Douglas-Peucker tolerance in MASK pixels: removes the 1px pixel
-        // staircase while keeping real corners/fingertips (~1% of a 128px
-        // proto mask).
-        private const val DP_EPSILON = 1.3f
+        // SPECKLE FILTER: proto noise produces small satellite blobs next to
+        // the real object (measured on real model output: 436/403/149-px
+        // speckles beside a 5810-px cat) that tint the frame as floating
+        // patches. A component below this fraction of the LARGEST component
+        // is dropped (and its pixels cleared from the bitmap), while genuine
+        // same-size objects (two hands) stay far above it.
+        private const val SPECKLE_FRACTION = 0.10f
+
+        // Douglas-Peucker tolerance in MASK pixels. Kept tight: the decode
+        // blur already removes the staircase, and ONE mask px is ~8 screen px
+        // on a phone, so a loose tolerance visibly cuts sharp tips away from
+        // the mesh (measured: 1.3 eps + resampling let boundaries poke
+        // ~15 screen px past a 5px stroke).
+        private const val DP_EPSILON = 0.7f
 
         // Every contour is resampled to this many points by arc length, so
         // consecutive frames index-align for smooth temporal blending and the
-        // path cost is bounded regardless of mask size.
-        private const val CONTOUR_POINTS = 72
+        // path cost is bounded regardless of mask size. 144 (not 72): at
+        // ~8 screen px per mask px, 72-point sampling spaced tips ~6 screen
+        // px off the true apex - the line visibly cut through fingertips.
+        private const val CONTOUR_POINTS = 144
 
         // Corner-aware smoothing: turning angles at or above this (degrees)
         // mark a genuine corner (fingertip, notch, box corner) and are locked;
@@ -405,6 +417,31 @@ class OverlayView @JvmOverloads constructor(
         // sorted to index 0 (the "primary" outline for label anchoring).
         val out = ArrayList<Pair<Int, List<Pair<Float, Float>>>>()
 
+        // PASS 1 - component sizes only (flood fills are cheap on ~16k px);
+        // needed BEFORE tracing so the speckle filter knows the largest blob.
+        var maxComp = 0
+        for (start in 0 until n) {
+            if (!solid[start] || seen[start]) continue
+            var sp = 0
+            stack[sp++] = start
+            seen[start] = true
+            var cc = 0
+            while (sp > 0) {
+                val j = stack[--sp]
+                comp[cc++] = j
+                val x = j % w
+                val y = j / w
+                if (x > 0) { val k = j - 1; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (x < w - 1) { val k = j + 1; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y > 0) { val k = j - w; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y < h - 1) { val k = j + w; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+            }
+            if (cc > maxComp) maxComp = cc
+            for (i in 0 until cc) seen[comp[i]] = false   // reset for pass 2
+        }
+        val speckleFloor = maxOf(MIN_CONTOUR_PX, (maxComp * SPECKLE_FRACTION).toInt())
+        var clearedMask = false
+
         for (start in 0 until n) {
             if (!solid[start] || seen[start]) continue
 
@@ -425,8 +462,15 @@ class OverlayView @JvmOverloads constructor(
                 if (y < h - 1) { val k = j + w; if (solid[k] && !seen[k]) { seen[k] = true; stack[sp++] = k } }
             }
 
-            if (cc < MIN_CONTOUR_PX) {
-                for (i in 0 until cc) mark[comp[i]] = false
+            if (cc < speckleFloor) {
+                // Speckle/noise blob: remove its pixels from the rendered
+                // bitmap too, so it never shows as a floating tint patch.
+                for (i in 0 until cc) {
+                    val j = comp[i]
+                    mark[j] = false
+                    px[j] = 0
+                    clearedMask = true
+                }
                 continue
             }
 
@@ -458,6 +502,11 @@ class OverlayView @JvmOverloads constructor(
             out.add(cc to smoothed.map { p ->
                 (p.first / mask.width.toFloat()) to (p.second / mask.height.toFloat())
             })
+        }
+
+        // Persist speckle removal (once, only when something was dropped).
+        if (clearedMask) {
+            mask.setPixels(px, 0, w, 0, 0, w, h)
         }
 
         // Biggest blob first: index 0 is the primary outline.
@@ -555,7 +604,10 @@ class OverlayView @JvmOverloads constructor(
         for (i in 0 until cc) { val j = comp[i]; if (j / w == minY) { val x = j % w; if (x < startX) startX = x } }
 
         val contour = ArrayList<Pair<Float, Float>>(cc)
-        contour.add(startX.toFloat() to minY.toFloat())
+        // Pixel CENTERS (start pixel is (startX,minY) -> +0.5): contour
+        // through integer corners sits 0.5 mask px off the true boundary
+        // (~4 screen px at phone scale) - half a stroke width of error.
+        contour.add(startX + 0.5f to minY + 0.5f)
 
         // Backtrack starts at the background pixel west of the start.
         var bx = startX - 1
@@ -590,7 +642,7 @@ class OverlayView @JvmOverloads constructor(
             }
             if (!found) break
             if (cx == startX && cy == minY) break   // closed the loop
-            contour.add(cx.toFloat() to cy.toFloat())
+            contour.add(cx + 0.5f to cy + 0.5f)
         }
         return contour
     }
@@ -868,7 +920,8 @@ class OverlayView @JvmOverloads constructor(
         }
 
         // PASS 3 - opaque strokes, then boxes/labels per item: the line stays
-        // at full strength centred on the boundary, above the tinted mesh.
+        // at full strength OUTSIDE the mesh (contour offset by half the
+        // stroke width), one continuous border around the object.
         for (i in items.indices) {
             val item = items[i]
             val det = item.det
@@ -960,6 +1013,35 @@ class OverlayView @JvmOverloads constructor(
      * contour point is represented exactly while the line between them is
      * smooth. Contours are closed by construction, so the path always closes.
      */
+    /**
+     * Shifts a screen-space closed polygon outward along per-point normals
+     * by [d] px. Direction comes from the polygon orientation (shoelace in
+     * y-down screen coords): positive area -> normal (ty, -tx) points away
+     * from the interior. Winding is canonicalized upstream, but the sign is
+     * computed here anyway so the helper is correct for any input.
+     * In-place on [pts] (x0,y0,x1,y1,...).
+     */
+    private fun offsetOutward(pts: FloatArray, n: Int, d: Float) {
+        var area2 = 0f
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            area2 += pts[i * 2] * pts[j * 2 + 1] - pts[j * 2] * pts[i * 2 + 1]
+        }
+        if (area2 == 0f) return
+        val sign = if (area2 > 0f) 1f else -1f
+        for (i in 0 until n) {
+            val pi = ((i - 1 + n) % n) * 2
+            val ni = ((i + 1) % n) * 2
+            val tx = pts[ni] - pts[pi]
+            val ty = pts[ni + 1] - pts[pi + 1]
+            val len = sqrt(tx * tx + ty * ty)
+            if (len < 1e-4f) continue
+            // Outward normal (screen y-down, positive shoelace): (ty, -tx).
+            pts[i * 2] += sign * (ty / len) * d
+            pts[i * 2 + 1] += -sign * (tx / len) * d
+        }
+    }
+
     private fun buildSmoothPath(
         dots: List<Pair<Float, Float>>, maskRect: RectF,
     ): Path {
@@ -971,6 +1053,13 @@ class OverlayView @JvmOverloads constructor(
             pts[i * 2] = maskRect.left + dots[i].first * maskRect.width()
             pts[i * 2 + 1] = maskRect.top + dots[i].second * maskRect.height()
         }
+
+        // OUTSIDE BORDER: shift every point outward by half the stroke
+        // width so the stroke sits FULLY outside the mesh - its inner edge
+        // lands exactly on the mask boundary, producing one continuous
+        // line surrounding the object (the old centred stroke put half the
+        // line on the mesh, which read as messy on textured backgrounds).
+        offsetOutward(pts, n, LINE_STROKE_W / 2f)
 
         val mids = FloatArray(n * 2)
         for (i in 0 until n) {

@@ -277,18 +277,17 @@ class YoloPostProcessor(
                             }
                         }
 
-                        // MESH SMOOTHING FILTER: the alpha byte stores a local linearization
-                        // of sigmoid around the decision boundary -
-                        // alpha ≈ 128 + 64*sum (sigmoid(x) ≈ 0.5 + x/4 near
-                        // the crossing). Written for BOTH sides of the
-                        // boundary (below 128 outside the object) so the
-                        // field carries its soft falloff; consumers threshold
-                        // at >128 exactly like sigmoid > 0.5. Two box-blur
-                        // passes below smooth this field (the proto grid's
-                        // staircase) BEFORE it is ever thresholded or drawn.
-                        val a = (128 + sum * 64).toInt().coerceIn(0, 255)
-                        pixels[y * usableProtoW + x] =
-                            if (a > 0) (a shl 24) or 0x00FFFFFF else 0
+                        // MESH SMOOTHING FILTER: INSIDE the object only -
+                        // alpha ≈ 128 + 64*sum (local linearization of
+                        // sigmoid around the boundary), graded 129..255.
+                        // Outside stays 0: writing alpha for any sum > -2
+                        // (the a>0 version) tinted the WHOLE frame faintly -
+                        // the fuzzy-mesh regression. The blur below then
+                        // feathers the edge by a bounded ~1px.
+                        if (sum > 0f) {
+                            val a = (128 + sum * 64).toInt().coerceIn(129, 255)
+                            pixels[y * usableProtoW + x] = (a shl 24) or 0x00FFFFFF
+                        }
                     }
                 }
 
