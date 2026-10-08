@@ -21,6 +21,14 @@ data class Detection(
     val maskCoefficients: FloatArray? = null,
     var maskBitmap: Bitmap? = null,
     /**
+     * IMAGE-SPACE OUTLINE BAND: small bitmap (~128px) covering the same
+     * source rect as [maskBitmap], whose alpha ramps bright immediately
+     * OUTSIDE the visible mesh edge (decoded alongside the mask - see
+     * YoloPostProcessor.smoothMaskAlpha). Render cache like maskBitmap;
+     * excluded from equals/hashCode by the custom implementations below.
+     */
+    var outlineBitmap: Bitmap? = null,
+    /**
      * Normalized rect [0..1] of the SOURCE IMAGE that [maskBitmap] covers.
      * Defaults cover the whole image (every full-frame mask); the split &
      * detect refine path sets these to its crop window, so a crop mask with

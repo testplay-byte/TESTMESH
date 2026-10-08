@@ -26,7 +26,10 @@ object Perf {
     private const val TAG = "Perf"
 
     /** Below this a stage is normal-speed and stays quiet. */
-    private const val MIN_MS = 16L
+    // 4ms (was 16): the overlay budget we care about is ~3-8ms per stage,
+    // so a 16ms floor hid every interesting reading. Costs a little more
+    // logcat volume while tuning; raise again once stages are confirmed fast.
+    private const val MIN_MS = 4L
 
     /** True to silence logging entirely (tests). */
     @Volatile var enabled: Boolean = true

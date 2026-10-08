@@ -39,6 +39,38 @@ class YoloPostProcessor(
         // band. 104 stays provably below the interior edge start (113) and
         // far above outside-feather max (85).
         private const val MESH_ALPHA_CUTOFF = 104
+
+        // ── IMAGE-SPACE OUTLINE BAND (outline redesign) ─────────────────────
+        // The outline is not vector geometry: it is a per-texel ALPHA RAMP
+        // harvested from the SAME blurred field the mesh is drawn from, in
+        // the zone immediately OUTSIDE the visible silhouette - texels whose
+        // blurred alpha sits in [RING_LOW_ALPHA, MESH_ALPHA_CUTOFF) get a
+        // bright ramp (0 at RING_LOW_ALPHA, 255 at the mesh edge). One
+        // threshold serves both layers: the band's inner edge and the mesh's
+        // outer edge are the SAME level set, so they meet with no gap, no
+        // overlap and no possibility of double lines. RING_LOW_ALPHA is the
+        // band's outer floor: the blur's exterior feather runs ~0-85 alpha
+        // for confident objects but only ~0-43 at soft/low-confidence edges
+        // - 40 keeps the outline present at soft edges too (a 60 floor left
+        // gaps there). The ramp is doubled and clamped so confident edges
+        // reach FULL brightness while the tail still fades smoothly to 0 at
+        // the floor (no hard outer step). Widening beyond the feather would
+        // need one extra blur pass on the band array (reserved knob; the
+        // feather is ~1-2 texels = 8-16 screen px today).
+        private const val RING_LOW_ALPHA = 40
+        private const val RING_SPAN = MESH_ALPHA_CUTOFF - RING_LOW_ALPHA
+
+        // SPECKLE FILTER (moved here from OverlayView so it applies whether
+        // or not the outline is drawn - previously speckles tinted the frame
+        // with the outline off): proto noise produces small satellite blobs
+        // next to the real object (measured: 436/403/149-px speckles beside
+        // a 5810-px cat) that float as tint patches AND would grow their own
+        // outline band. A component below this fraction of the LARGEST
+        // component (absolute floor MIN_SPECKLE_PX) is erased from the mask
+        // and its band, while genuine same-size objects (two hands) stay far
+        // above the floor.
+        private const val SPECKLE_FRACTION = 0.10f
+        private const val MIN_SPECKLE_PX = 12
         private const val MASK_COEFFS = 32   // YOLO-seg prototype coefficient count
         private const val MIN_BOXES = 3      // a sane box tensor has >= 3 feature rows
     }
@@ -246,6 +278,12 @@ class YoloPostProcessor(
         val pixels = IntArray(usableProtoW * usableProtoH)
         // Scratch for the mesh smoothing filter (alpha-only blur passes).
         val blurTmp = IntArray(usableProtoW * usableProtoH)
+        // Scratch for the outline band (same size; zeroed per detection).
+        val ring = IntArray(usableProtoW * usableProtoH)
+        // Scratch for the speckle filter (flood fill: stack + seen + component).
+        val floodStack = IntArray(usableProtoW * usableProtoH)
+        val floodSeen = BooleanArray(usableProtoW * usableProtoH)
+        val floodComp = IntArray(usableProtoW * usableProtoH)
 
         // Stage 1A (accuracy): masks decode over the FULL usable proto area -
         // the old bbox-crop structurally dropped real mask protrusions beyond
@@ -260,7 +298,9 @@ class YoloPostProcessor(
                 if (coeffs.size != protoC) continue
 
                 java.util.Arrays.fill(pixels, 0)
+                java.util.Arrays.fill(ring, 0)
                 val mask = Bitmap.createBitmap(usableProtoW, usableProtoH, Bitmap.Config.ARGB_8888)
+                det.outlineBitmap = null
 
                 // Bbox bounds for the bbox-only fallback path.
                 val boxL = (det.boundingBox.left * usableProtoW).toInt().coerceIn(0, usableProtoW - 1)
@@ -303,18 +343,35 @@ class YoloPostProcessor(
                     }
                 }
 
-                // Apply the mesh smoothing filter (ONE separable 3x3 box pass over the
-                // alpha bytes) - removes the 128px-grid staircase from the mesh
-                // edge AND from the contour the outline traces. One pass only:
-                // a second erodes sub-3px features (fingertips) and closes 1px
-                // gaps between blobs (measured on a byte-exact port).
-                smoothMaskAlpha(pixels, blurTmp, usableProtoW, usableProtoH)
+                // Smoothing filter (ONE separable 3x3 pass) + OUTLINE BAND
+                // harvest: the V-pass computes the final blurred alpha and,
+                // for full-frame decodes, writes the band ramp for texels in
+                // [RING_LOW_ALPHA, cutoff) - the zone just outside the mesh.
+                // Bbox-only decodes (tail of a crowded scene) skip the band:
+                // their mask is cut at the box edge and a band there would
+                // draw straight lines along that artificial cut.
+                val fullDecode = detIdx < fullDecodeCount
+                smoothMaskAlpha(pixels, ring, blurTmp, usableProtoW,
+                    usableProtoH, fullDecode)
+
+                // Speckle erasure (mask + band): tiny noise blobs must not
+                // tint or outline anything (works with the outline OFF too).
+                removeSpeckles(pixels, ring, usableProtoW, usableProtoH,
+                    floodStack, floodSeen, floodComp)
 
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)
                 det.maskBitmap = mask
+                if (fullDecode) {
+                    val outline = Bitmap.createBitmap(usableProtoW, usableProtoH,
+                        Bitmap.Config.ARGB_8888)
+                    outline.setPixels(ring, 0, usableProtoW, 0, 0,
+                        usableProtoW, usableProtoH)
+                    det.outlineBitmap = outline
+                }
             } catch (e: Exception) {
                 // A single bad detection never takes down the batch (F7).
                 det.maskBitmap = null
+                det.outlineBitmap = null
             }
         }
 
@@ -329,16 +386,25 @@ class YoloPostProcessor(
     }
 
     /**
-     * Mesh smoothing filter: ONE separable 3x3 box-blur pass over the alpha
-     * bytes of [pix] (white RGB preserved where alpha > 0). Smooths the
-     * proto-grid staircase at the source, so both the tinted mesh edge and
-     * the contour extracted by OverlayView arrive already anti-aliased.
-     * Exactly one pass - a second would erode sub-3px features and merge
-     * 1px gaps (measured on a byte-exact port). Uses [tmp] as row-pass
-     * scratch (same length as [pix], fully rewritten each pass, so stale
-     * contents are never read).
+     * Mesh smoothing filter + outline band harvest: ONE separable 3x3
+     * box-blur pass over the alpha bytes of [pix] (white RGB preserved).
+     * Smooths the proto-grid staircase at the source, so the tinted mesh
+     * edge arrives anti-aliased. Exactly one pass - a second would erode
+     * sub-3px features and merge 1px gaps (measured on a byte-exact port).
+     *
+     * The V-pass writes two outputs from the SAME final blurred value:
+     *  - [pix]: the mesh (alpha >= [MESH_ALPHA_CUTOFF], else 0);
+     *  - [ring]: the outline band when [writeRing] - a bright ramp for
+     *    alpha in [RING_LOW_ALPHA, cutoff), brightest AT the mesh edge and
+     *    fading outward. Both layers therefore share one threshold: band
+     *    inner edge == mesh outer edge, gap-free and double-line-free by
+     *    construction (the outline redesign).
+     *
+     * Uses [tmp] as row-pass scratch (same length as [pix], fully rewritten
+     * each pass, so stale contents are never read).
      */
-    private fun smoothMaskAlpha(pix: IntArray, tmp: IntArray, w: Int, h: Int) {
+    private fun smoothMaskAlpha(pix: IntArray, ring: IntArray, tmp: IntArray,
+        w: Int, h: Int, writeRing: Boolean) {
         // Horizontal pass: pix -> tmp (edge pixels duplicate the neighbor).
         for (y in 0 until h) {
             val r = y * w
@@ -351,10 +417,11 @@ class YoloPostProcessor(
                 a0 = a1
             }
         }
-        // Vertical pass: tmp -> pix. Also applies the spill cutoff: values
-        // below MESH_ALPHA_CUTOFF can only be outside-feather (max 85 after
-        // one pass) or sub-threshold noise - zeroing them snaps the tinted
-        // mesh edge back to the object boundary.
+        // Vertical pass: tmp -> pix. Values below MESH_ALPHA_CUTOFF are
+        // outside-feather (max 85 after one pass) - zeroed from the mesh
+        // (snaps the tint edge to the object boundary) AND harvested into
+        // the outline band while they last (the zone is 1-2 texels wide, so
+        // the band is a ~8-16 screen px soft border hugging the mesh).
         for (x in 0 until w) {
             var a0 = tmp[x] ushr 24
             for (y in 0 until h) {
@@ -362,8 +429,102 @@ class YoloPostProcessor(
                 val a1 = tmp[i] ushr 24
                 val a2 = if (y + 1 < h) tmp[(y + 1) * w + x] ushr 24 else a1
                 val av = (a0 + a1 + a2) / 3
-                pix[i] = if (av >= MESH_ALPHA_CUTOFF) (av shl 24) or 0x00FFFFFF else 0
+                if (av >= MESH_ALPHA_CUTOFF) {
+                    pix[i] = (av shl 24) or 0x00FFFFFF
+                } else {
+                    pix[i] = 0
+                    if (writeRing && av >= RING_LOW_ALPHA) {
+                        // Ramp: 0 at the feather's outer floor -> 255 at
+                        // av = LOW + SPAN/2 (a typical confident edge sits
+                        // there), clamped - bright line, soft outer tail.
+                        val ra = ((av - RING_LOW_ALPHA) * 510 / RING_SPAN)
+                            .coerceIn(0, 255)
+                        ring[i] = (ra shl 24) or 0x00FFFFFF
+                    }
+                }
                 a0 = a1
+            }
+        }
+    }
+
+    /**
+     * Erases noise-speckle components (below SPECKLE_FRACTION of the largest
+     * component, floor MIN_SPECKLE_PX) from BOTH the mesh [pix] and the
+     * outline band [ring] - speckles must not tint or outline anything,
+     * regardless of the outline toggle. Two cheap sweeps over the ~16k-texel
+     * mask (background thread): pass 1 finds the largest component's size,
+     * pass 2 zeroes every component below the floor. Uses caller-provided
+     * scratch (stack/seen/comp) - no allocation per detection.
+     */
+    private fun removeSpeckles(pix: IntArray, ring: IntArray, w: Int, h: Int,
+        stack: IntArray, seen: BooleanArray, comp: IntArray,
+    ) {
+        val n = w * h
+        val solid: (Int) -> Boolean = { j -> (pix[j] ushr 24) >= MESH_ALPHA_CUTOFF }
+
+        // Pass 1: largest component size.
+        java.util.Arrays.fill(seen, false)
+        var maxPx = 0
+        for (start in 0 until n) {
+            if (!solid(start) || seen[start]) continue
+            var sp = 0
+            stack[sp++] = start
+            seen[start] = true
+            var cc = 0
+            while (sp > 0) {
+                val j = stack[--sp]
+                comp[cc++] = j
+                val x = j % w
+                val y = j / w
+                if (x > 0) { val k = j - 1; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (x < w - 1) { val k = j + 1; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y > 0) { val k = j - w; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y < h - 1) { val k = j + w; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+            }
+            if (cc > maxPx) maxPx = cc
+        }
+        val floor = maxOf(MIN_SPECKLE_PX, (maxPx * SPECKLE_FRACTION).toInt())
+        if (maxPx < floor) return
+
+        // Pass 2: erase every component below the floor (mesh AND band).
+        java.util.Arrays.fill(seen, false)
+        for (start in 0 until n) {
+            if (!solid(start) || seen[start]) continue
+            var sp = 0
+            stack[sp++] = start
+            seen[start] = true
+            var cc = 0
+            while (sp > 0) {
+                val j = stack[--sp]
+                comp[cc++] = j
+                val x = j % w
+                val y = j / w
+                if (x > 0) { val k = j - 1; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (x < w - 1) { val k = j + 1; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y > 0) { val k = j - w; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+                if (y < h - 1) { val k = j + w; if (solid(k) && !seen[k]) { seen[k] = true; stack[sp++] = k } }
+            }
+            if (cc < floor) {
+                for (i in 0 until cc) {
+                    val j = comp[i]
+                    pix[j] = 0
+                    ring[j] = 0
+                    // Also erase the speckle's BAND halo: the outline band
+                    // sits OUTSIDE the solid component (never part of it),
+                    // so without a small outward sweep the erased speckle
+                    // would keep a floating outline ring.
+                    val x = j % w
+                    val y = j / w
+                    for (dy in -2..2) {
+                        val yy = y + dy
+                        if (yy < 0 || yy >= h) continue
+                        for (dx in -2..2) {
+                            val xx = x + dx
+                            if (xx < 0 || xx >= w) continue
+                            ring[yy * w + xx] = 0
+                        }
+                    }
+                }
             }
         }
     }
