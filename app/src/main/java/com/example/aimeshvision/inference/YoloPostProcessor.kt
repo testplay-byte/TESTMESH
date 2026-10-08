@@ -232,6 +232,8 @@ class YoloPostProcessor(
         // per detection: stale 0xFFFFFFFF pixels from a previous detection
         // would bleed into this detection's bitmap (reviewer-found bug).
         val pixels = IntArray(usableProtoW * usableProtoH)
+        // Scratch for the mesh smoothing filter (alpha-only blur passes).
+        val blurTmp = IntArray(usableProtoW * usableProtoH)
 
         // Stage 1A (accuracy): masks decode over the FULL usable proto area -
         // the old bbox-crop structurally dropped real mask protrusions beyond
@@ -275,20 +277,28 @@ class YoloPostProcessor(
                             }
                         }
 
-                        // PERF: sigmoid(sum) > 0.5 is mathematically identical
-                        // to sum > 0 - the exp() call (per pixel per detection,
-                        // the hottest line in the pipeline) is skipped entirely.
-                        // Stage 1B (subpixel outline): the alpha byte carries a
-                        // local linearization of sigmoid, alpha ≈ 128 + 64*sum
-                        // (sigmoid(x) ≈ 0.5 + x/4 near the crossing - the only
-                        // place the value matters). Border dots later lerp to
-                        // the true 0.5-level crossing between pixels.
-                        if (sum > 0f) {
-                            val a = (128 + sum * 64).toInt().coerceIn(129, 255)
-                            pixels[y * usableProtoW + x] = (a shl 24) or 0x00FFFFFF
-                        }
+                        // MESH SMOOTHING FILTER: the alpha byte stores a local linearization
+                        // of sigmoid around the decision boundary -
+                        // alpha ≈ 128 + 64*sum (sigmoid(x) ≈ 0.5 + x/4 near
+                        // the crossing). Written for BOTH sides of the
+                        // boundary (below 128 outside the object) so the
+                        // field carries its soft falloff; consumers threshold
+                        // at >128 exactly like sigmoid > 0.5. Two box-blur
+                        // passes below smooth this field (the proto grid's
+                        // staircase) BEFORE it is ever thresholded or drawn.
+                        val a = (128 + sum * 64).toInt().coerceIn(0, 255)
+                        pixels[y * usableProtoW + x] =
+                            if (a > 0) (a shl 24) or 0x00FFFFFF else 0
                     }
                 }
+
+                // Apply the mesh smoothing filter (ONE separable 3x3 box pass over the
+                // alpha bytes) - removes the 128px-grid staircase from the mesh
+                // edge AND from the contour the outline traces. One pass only:
+                // a second erodes sub-3px features (fingertips) and closes 1px
+                // gaps between blobs (measured on a byte-exact port).
+                smoothMaskAlpha(pixels, blurTmp, usableProtoW, usableProtoH)
+
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)
                 det.maskBitmap = mask
             } catch (e: Exception) {
@@ -304,6 +314,43 @@ class YoloPostProcessor(
             android.util.Log.i("YoloPostProcessor",
                 "decodeMasks: ${detections.size} det(s) in ${decodeMs}ms " +
                     "(full-frame for $fullDecodeCount)")
+        }
+    }
+
+    /**
+     * Mesh smoothing filter: ONE separable 3x3 box-blur pass over the alpha
+     * bytes of [pix] (white RGB preserved where alpha > 0). Smooths the
+     * proto-grid staircase at the source, so both the tinted mesh edge and
+     * the contour extracted by OverlayView arrive already anti-aliased.
+     * Exactly one pass - a second would erode sub-3px features and merge
+     * 1px gaps (measured on a byte-exact port). Uses [tmp] as row-pass
+     * scratch (same length as [pix], fully rewritten each pass, so stale
+     * contents are never read).
+     */
+    private fun smoothMaskAlpha(pix: IntArray, tmp: IntArray, w: Int, h: Int) {
+        // Horizontal pass: pix -> tmp (edge pixels duplicate the neighbor).
+        for (y in 0 until h) {
+            val r = y * w
+            var a0 = pix[r] ushr 24
+            for (x in 0 until w) {
+                val a1 = pix[r + x] ushr 24
+                val a2 = if (x + 1 < w) pix[r + x + 1] ushr 24 else a1
+                val av = (a0 + a1 + a2) / 3
+                tmp[r + x] = if (av > 0) (av shl 24) or 0x00FFFFFF else 0
+                a0 = a1
+            }
+        }
+        // Vertical pass: tmp -> pix.
+        for (x in 0 until w) {
+            var a0 = tmp[x] ushr 24
+            for (y in 0 until h) {
+                val i = y * w + x
+                val a1 = tmp[i] ushr 24
+                val a2 = if (y + 1 < h) tmp[(y + 1) * w + x] ushr 24 else a1
+                val av = (a0 + a1 + a2) / 3
+                pix[i] = if (av > 0) (av shl 24) or 0x00FFFFFF else 0
+                a0 = a1
+            }
         }
     }
 

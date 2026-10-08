@@ -81,6 +81,13 @@ class OverlayView @JvmOverloads constructor(
         // path cost is bounded regardless of mask size.
         private const val CONTOUR_POINTS = 72
 
+        // Corner-aware smoothing: turning angles at or above this (degrees)
+        // mark a genuine corner (fingertip, notch, box corner) and are locked;
+        // all other points are damped toward their neighbours' midpoint.
+        private const val CORNER_ANGLE_DEG = 50.0
+        private const val CORNER_SMOOTH_K = 0.35f
+        private const val CORNER_SMOOTH_ITERS = 2
+
         private const val LINE_STROKE_W = 5f     // screen px (old look)
 
         // ── temporal smoothing (dot EMA + label anchor) ──────────────────
@@ -95,7 +102,20 @@ class OverlayView @JvmOverloads constructor(
         // Stage 2C: chains beyond the primary that get EMA tracks, and the
         // first-dot proximity gate (normalized) guarding every correspondence.
         private const val MAX_SECONDARY_EMA = 2   // primary + 2 secondary = top 3
-        private const val FIRST_DOT_GATE = 0.03f
+        // First-point proximity gate guarding EMA correspondence. With the
+        // anchor-stable pipeline index 0 is the same physical point every
+        // frame; IoU instance matching already allows ~0.10-0.15 normalized
+        // displacement per frame, so this gate must be LOOSE enough not to
+        // trip on normal fast motion (each trip used to pop the outline to
+        // raw for a frame - the residual jitter source). A failed gate with
+        // matching length still blends, at reduced weight (emaSoft rawBias).
+        private const val FIRST_DOT_GATE = 0.12f
+
+        // Weight shift toward raw when the gate misses but correspondence is
+        // still structurally valid (same length on an IoU-matched instance).
+        // 0.5 keeps meaningful smoothing while staying responsive enough that
+        // the track re-converges within a frame or two - no pop-to-raw.
+        private const val RAW_BIAS_ON_GATE_MISS = 0.5f
     }
 
     /** A detection with its per-frame geometry precomputed in [setResults]. */
@@ -217,19 +237,32 @@ class OverlayView @JvmOverloads constructor(
                     // order (index 0 = primary).
                     val nextTracks = ArrayList<Track?>(normContours.size)
 
-                    // Primary (biggest blob): match to the instance's primary
-                    // track, guarded by equal length + first-point proximity.
+                    // Primary (biggest blob): match to the instance's primary track.
+                    // Correspondence outcomes, in order:
+                    //  - no prev track / structural length change -> raw
+                    //  - length matches + within gate -> full soft EMA
+                    //  - length matches but outside gate (fast motion on an
+                    //    IoU-matched instance) -> soft EMA with reduced weight,
+                    //    so the line never pops to raw and the track recovers
+                    //    next frame instead of resetting.
                     val primary = normContours[0]
                     val primaryPrev = inst?.track
-                    val primaryOk = primaryPrev != null &&
-                        primaryPrev.points.size == primary.size &&
-                        firstDotClose(primaryPrev.points, primary)
-                    val primarySmoothed = if (primaryOk) emaSoft(primaryPrev!!, primary) else primary
-                    anchor = if (inst != null && primaryOk) {
+                    val primaryLenMatch = primaryPrev != null &&
+                        primaryPrev.points.size == primary.size
+                    val primaryGateOk = primaryLenMatch &&
+                        firstDotClose(primaryPrev!!.points, primary)
+                    val primarySmoothed = when {
+                        !primaryLenMatch -> primary
+                        primaryGateOk -> emaSoft(primaryPrev!!, primary)
+                        else -> emaSoft(primaryPrev!!, primary, RAW_BIAS_ON_GATE_MISS)
+                    }
+                    anchor = if (inst != null && primaryLenMatch) {
                         emaAnchor(inst, primarySmoothed)
                     } else primarySmoothed.minOfOrNull { it.second }
                     outContours.add(primarySmoothed)
-                    nextTracks.add(Track(primarySmoothed.toTypedArray(), null))
+                    // Store the smoothed anchor so emaAnchor has a previous
+                    // value next frame (it was never assigned before).
+                    nextTracks.add(Track(primarySmoothed.toTypedArray(), anchor))
 
                     // Secondary blobs: match each to the nearest UNUSED previous
                     // secondary track by first-point distance (NOT by sorted
@@ -252,9 +285,15 @@ class OverlayView @JvmOverloads constructor(
                         }
                         val prev = if (bestK >= 0) prevSec!![bestK] else null
                         if (bestK >= 0) secUsed[bestK] = true
-                        val correspondable = prev != null &&
-                            prev.points.size == chain.size && firstDotClose(prev.points, chain)
-                        val smoothed = if (correspondable) emaSoft(prev!!, chain) else chain
+                        val correspondable = prev != null && firstDotClose(prev.points, chain)
+                        val smoothed = when {
+                            prev == null -> chain
+                            correspondable -> emaSoft(prev, chain)
+                            // Matched but outside the gate: reduced-weight
+                            // blend instead of a pop to raw (same policy as
+                            // the primary path).
+                            else -> emaSoft(prev, chain, RAW_BIAS_ON_GATE_MISS)
+                        }
                         outContours.add(smoothed)
                         if (ci <= MAX_SECONDARY_EMA) {
                             nextTracks.add(Track(smoothed.toTypedArray(), null))
@@ -396,20 +435,27 @@ class OverlayView @JvmOverloads constructor(
             for (i in 0 until cc) mark[comp[i]] = false
             if (contour == null || contour.size < 6) continue
 
-            val simplified = simplifyClosed(contour, DP_EPSILON)
+            // Winding fix ONLY, preserving index 0: the trace start is the
+            // topmost-leftmost boundary pixel - the most stable anchor a
+            // frame-to-frame correspondence can have.
+            val anchored = canonicalize(contour)
+
+            // DP split AT the anchor (its endpoints survive exactly), so the
+            // resampling lattice below always starts from the same physical
+            // point - no rotation ever moves index 0 again.
+            val simplified = simplifyAnchored(anchored, DP_EPSILON)
             if (simplified.size < 3) continue
 
-            // Canonicalize BEFORE resampling: index 0 becomes exactly the same
-            // physical point (topmost, then leftmost) in every frame, so the
-            // arc-length lattice starts from a stable origin and index i maps
-            // to the same boundary location across frames.
-            val canonical = canonicalize(simplified)
-
-            val resampled = resampleClosed(canonical, CONTOUR_POINTS)
+            val resampled = resampleClosed(simplified, CONTOUR_POINTS)
             if (resampled.size < 3) continue
 
+            // Corner-aware smoothing: damp the residual micro-wiggle (the
+            // "jittery" look) while locking genuine corners (fingertips,
+            // notches, box corners) so sharp turns stay sharp.
+            val smoothed = cornerSmooth(resampled)
+
             // Store normalized to 0..1 mask space BEFORE any screen mapping.
-            out.add(cc to resampled.map { p ->
+            out.add(cc to smoothed.map { p ->
                 (p.first / mask.width.toFloat()) to (p.second / mask.height.toFloat())
             })
         }
@@ -420,11 +466,11 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Canonicalizes a closed polygon for stable temporal correspondence:
-     * reverses it to a consistent winding (positive signed area) and rotates
-     * it so index 0 is the topmost-then-leftmost point. Without this, the
-     * trace/resample start point drifts frame to frame and the EMA would blend
-     * point i against a spatially unrelated point.
+     * Normalizes contour winding to positive signed area while PRESERVING
+     * index 0 (the trace's topmost-leftmost anchor). Reversing flips the
+     * anchor to the end, so the reversed list is rotated by one to put it
+     * back at index 0. The anchor must never move: it is the temporal
+     * correspondence origin for every later frame.
      */
     private fun canonicalize(pts: List<Pair<Float, Float>>): List<Pair<Float, Float>> {
         val n = pts.size
@@ -435,15 +481,56 @@ class OverlayView @JvmOverloads constructor(
             val b = pts[(i + 1) % n]
             area2 += a.first * b.second - b.first * a.second
         }
-        var ring = if (area2 < 0f) pts.reversed() else pts
-        var startIdx = 0
-        for (i in 1 until n) {
-            val y = ring[i].second
-            val y0 = ring[startIdx].second
-            if (y < y0 || (y == y0 && ring[i].first < ring[startIdx].first)) startIdx = i
+        if (area2 >= 0f) return pts
+        val r = pts.reversed()          // anchor (pts[0]) now sits at index n-1
+        return r.subList(n - 1, n) + r.subList(0, n - 1)
+    }
+
+    /**
+     * Corner-preserving smoothing of the resampled ring: each point's turning
+     * angle is measured; angles >= [CORNER_ANGLE_DEG] mark a GENUINE corner
+     * and are locked, everything else is pulled toward its neighbours'
+     * midpoint ([CORNER_SMOOTH_K], [CORNER_SMOOTH_ITERS] passes). High-
+     * frequency wiggle damps away in two passes while slow, real curvature
+     * is untouched - the line reads smooth but still turns hard where the
+     * object actually does (fingertips, notches, right-angle corners).
+     */
+    private fun cornerSmooth(pts: List<Pair<Float, Float>>): List<Pair<Float, Float>> {
+        val n = pts.size
+        if (n < 8) return pts
+
+        val corner = BooleanArray(n)
+        for (i in 0 until n) {
+            val p0 = pts[(i - 1 + n) % n]
+            val p1 = pts[i]
+            val p2 = pts[(i + 1) % n]
+            val v1x = p1.first - p0.first
+            val v1y = p1.second - p0.second
+            val v2x = p2.first - p1.first
+            val v2y = p2.second - p1.second
+            val l1 = sqrt(v1x * v1x + v1y * v1y)
+            val l2 = sqrt(v2x * v2x + v2y * v2y)
+            if (l1 < 1e-6f || l2 < 1e-6f) continue
+            val dot = ((v1x * v2x + v1y * v2y) / (l1 * l2)).toDouble().coerceIn(-1.0, 1.0)
+            if (Math.toDegrees(kotlin.math.acos(dot)) >= CORNER_ANGLE_DEG) corner[i] = true
         }
-        if (startIdx == 0) return ring
-        return ring.subList(startIdx, n) + ring.subList(0, startIdx)
+
+        var cur = pts
+        repeat(CORNER_SMOOTH_ITERS) {
+            val out = ArrayList<Pair<Float, Float>>(n)
+            for (i in 0 until n) {
+                val p = cur[i]
+                if (corner[i]) { out.add(p); continue }
+                val prev = cur[(i - 1 + n) % n]
+                val next = cur[(i + 1) % n]
+                val mx = (prev.first + next.first) / 2f
+                val my = (prev.second + next.second) / 2f
+                out.add(p.first + (mx - p.first) * CORNER_SMOOTH_K to
+                    p.second + (my - p.second) * CORNER_SMOOTH_K)
+            }
+            cur = out
+        }
+        return cur
     }
 
     /** 8-neighbour offsets in clockwise order (E, SE, S, SW, W, NW, N, NE). */
@@ -563,42 +650,22 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Douglas-Peucker for a CLOSED polygon: rotates the ring to start at the
-     * point farthest from the centroid (so both halves are non-degenerate even
-     * for convex shapes), splits it in half, simplifies each half, then drops
-     * only the ONE vertex duplicated at the split (A's last == B's first).
-     * The ring's wrap endpoint (B's last) is a real vertex and is kept.
+     * Douglas-Peucker for a CLOSED ring, split at the anchor (index 0): the
+     * ring is cut open at pts[0], simplified as an open polyline with BOTH
+     * endpoints pinned to that anchor, then the duplicated closing point is
+     * dropped. Unlike a rotation-based split, the anchor vertex survives
+     * exactly, so temporal correspondence never re-phases between frames.
      */
-    private fun simplifyClosed(
-        ptsIn: List<Pair<Float, Float>>, eps: Float,
+    private fun simplifyAnchored(
+        ring: List<Pair<Float, Float>>, eps: Float,
     ): List<Pair<Float, Float>> {
-        var pts = ptsIn
-        if (pts.size > 1 && pts.first() == pts.last()) pts = pts.dropLast(1)
-        if (pts.size < 4) return pts
-        // Split at the point farthest from the centroid (keeps both halves
-        // non-degenerate even for convex shapes).
-        var cxs = 0f
-        var cys = 0f
-        for (p in pts) { cxs += p.first; cys += p.second }
-        cxs /= pts.size
-        cys /= pts.size
-        var farIdx = 0
-        var farD = -1f
-        for (i in pts.indices) {
-            val dx = pts[i].first - cxs
-            val dy = pts[i].second - cys
-            val d = dx * dx + dy * dy
-            if (d > farD) { farD = d; farIdx = i }
-        }
-        val rot = pts.subList(farIdx, pts.size) + pts.subList(0, farIdx)
-        val half = rot.size / 2
-        val a = simplifyOpen(rot.subList(0, half + 1), eps)
-        val b = simplifyOpen(rot.subList(half, rot.size), eps)
-        // Join: drop the single duplicated split vertex (a.last == b.first).
-        val out = ArrayList<Pair<Float, Float>>(a.size + b.size)
-        out.addAll(a.subList(0, a.size - 1))
-        out.addAll(b)
-        return out
+        if (ring.size < 5) return ring
+        val loop = ArrayList<Pair<Float, Float>>(ring.size + 1)
+        loop.addAll(ring)
+        loop.add(ring[0])                       // close explicitly at the anchor
+        val half = simplifyOpen(loop, eps)
+        if (half.size < 3) return ring
+        return half.subList(0, half.size - 1)   // drop the duplicated anchor
     }
 
     /** Resamples a closed polygon to exactly [count] points by arc length. */
@@ -644,17 +711,26 @@ class OverlayView @JvmOverloads constructor(
      * in both frames and index i is within the small arc-length drift from
      * perimeter change. A size change falls back to the raw contour.
      */
+    /**
+     * EMA-blends the contour points with the previous frame's track. Both
+     * contours are canonicalized (same winding, same start point) and have the
+     * same fixed point count, so index 0 maps to the exact same boundary point
+     * in both frames and index i is within the small arc-length drift from
+     * perimeter change. A size change falls back to the raw contour.
+     *
+     * [rawBias] shifts the final blend toward raw (0 = normal soft gate,
+     * 1 = fully raw). Used when the first-point gate misses on a structurally
+     * valid correspondence: smoothing is reduced but never dropped, so the
+     * outline does not pop to raw for a frame (the old binary behaviour).
+     */
     private fun emaSoft(
-        prev: Track, rawIn: List<Pair<Float, Float>>,
+        prev: Track, rawIn: List<Pair<Float, Float>>, rawBias: Float = 0f,
     ): List<Pair<Float, Float>> {
         if (prev.points.size != rawIn.size) {
             return rawIn
         }
 
-        // Stage 2D: soft per-dot gate. Correspondence is guaranteed upstream
-        // (length match + canonical winding from Stage 3F), so the hard
-        // chain-level snap (which made every fast move pop to raw) becomes a
-        // continuous blend: blend weight fades from full smoothing at d=0 to
+        // Soft per-dot gate: blend weight fades from full smoothing at d=0 to
         // raw at d=MAX_TRACK_DISTANCE. Small changes stay smooth; large
         // changes pass through instead of popping.
         val out = ArrayList<Pair<Float, Float>>(rawIn.size)
@@ -668,7 +744,8 @@ class OverlayView @JvmOverloads constructor(
             val d = sqrt(dx * dx + dy * dy)
             // weight on the NEW position: 0 (full smoothing) .. 1 (raw)
             val rawWeight = (d / MAX_TRACK_DISTANCE).coerceIn(0f, 1f)
-            val blend = rawWeight + (1f - rawWeight) * (1f - SMOOTHING)
+            var blend = rawWeight + (1f - rawWeight) * (1f - SMOOTHING)
+            if (rawBias > 0f) blend += (1f - blend) * rawBias
             out.add(px + dx * blend to py + dy * blend)
         }
         return out
