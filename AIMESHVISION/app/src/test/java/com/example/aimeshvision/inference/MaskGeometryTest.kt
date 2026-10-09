@@ -106,8 +106,9 @@ class MaskGeometryTest {
         val solids = ArrayList<Pair<Float, Float>>()
         for (y in 0 until f.h) for (x in 0 until f.w) {
             if (f.solid(x, y)) {
-                // coarse center -> fine coordinate: S(c+0.5)+1.5
-                solids.add(x * cs + cs / 2f + 1.5f to y * cs + cs / 2f + 1.5f)
+                // coarse center -> fine coordinate: S*(c+0.5) mapped
+                // through the raster's c = (2i-(S-1))/(2S) = x*S + S - 0.5
+                solids.add(x * cs + cs - 0.5f to y * cs + cs - 0.5f)
             }
         }
         var best = 0f
@@ -152,9 +153,9 @@ class MaskGeometryTest {
         // crosses the square's bottom edge, and the deep interior between
         // them is CORRECTLY band-free.
         val col = (30 * s + s / 2)
-        val boundary = 16f * s + 1.5f
-        val lo = (boundary - 20f).toInt().coerceAtLeast(0)
-        val hi = (boundary + 20f).toInt().coerceAtMost(f.fh - 1)
+        val boundary = 16f * s + (s - 1) / 2f
+        val lo = (boundary - 4f * s).toInt().coerceAtLeast(0)
+        val hi = (boundary + 4f * s).toInt().coerceAtMost(f.fh - 1)
         var first = -1
         var last = -1
         for (j in lo..hi) {
@@ -173,14 +174,14 @@ class MaskGeometryTest {
         // The lit run straddles the boundary (both sides present)...
         assertTrue("run [$first..$last] must cover boundary $boundary",
             first < boundary && last > boundary)
-        // ...with meaningful depth on both sides (fine units: outer reach
-        // 2 coarse texels = 8 fine, inner 1 = 4 fine, +/- falloff).
-        assertTrue("outer depth too small: ${boundary - first}", boundary - first >= 6f)
-        assertTrue("inner depth too small: ${last - boundary}", last - boundary >= 3f)
-        // ...and is bounded by the widest possible reach (3 coarse texels
-        // incl. falloff = 12 fine per side, +/- rounding).
-        assertTrue("run too deep outward", boundary - first <= 14f)
-        assertTrue("run too deep inward", last - boundary <= 7f)
+        // ...with meaningful depth on both sides, expressed in coarse
+        // texels (x s fine texels): extent <= 2 coarse per side + falloff.
+        assertTrue("outer depth too small: ${boundary - first}",
+            boundary - first >= 1.5f * s)
+        assertTrue("inner depth too small: ${last - boundary}",
+            last - boundary >= 0.75f * s)
+        assertTrue("run too deep outward", boundary - first <= 3.5f * s)
+        assertTrue("run too deep inward", last - boundary <= 2f * s)
     }
 
     // ── 1: solidity, corners, continuity ────────────────────────────────────
@@ -373,9 +374,9 @@ class MaskGeometryTest {
         // most ~1-2 intermediate values; the old full-width soft gradient
         // had ~8 per side (the "blurred out" look).
         val col = (30 * s + s / 2)
-        val boundary = 16f * s + 1.5f
-        val lo = (boundary - 20f).toInt().coerceAtLeast(0)
-        val hi = (boundary + 20f).toInt().coerceAtMost(f.fh - 1)
+        val boundary = 16f * s + (s - 1) / 2f
+        val lo = (boundary - 4f * s).toInt().coerceAtLeast(0)
+        val hi = (boundary + 4f * s).toInt().coerceAtMost(f.fh - 1)
         var partial = 0
         var peak = 0
         for (j in lo..hi) {
@@ -386,7 +387,7 @@ class MaskGeometryTest {
         assertEquals("flat-top peak present", 255, peak)
         assertTrue(
             "too many blurred (partial-alpha) texels: $partial",
-            partial <= 3,
+            partial <= 5,
         )
     }
 
@@ -412,12 +413,11 @@ class MaskGeometryTest {
         assertEquals("hairline peak stays solid", 255, hair.maxRingAlpha())
         assertTrue("hairline has depth", hairDepth >= 1f)
         // And bounded: per-side floor 0.5 coarse texel beyond the boundary
-        // (cardinal ~4 fine texels from the first solid centre; square
-        // corners add a diagonal component) - nowhere near the ~10 of the
-        // default width.
+        // (~1.5 coarse texels from the first solid centre incl. corners) -
+        // nowhere near the ~2.5 coarse of the default width.
         assertTrue(
             "hairline too fat: $hairDepth",
-            hairDepth <= 6f,
+            hairDepth <= 1.5f * s,
         )
     }
 }

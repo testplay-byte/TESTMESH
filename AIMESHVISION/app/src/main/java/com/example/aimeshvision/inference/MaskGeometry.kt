@@ -70,8 +70,10 @@ object MaskGeometry {
      * (corners quantized in ~9px steps, visible as a chunky, "low-res"
      * outline even though the mesh tint itself reads fine).
      *
-     * The band is now evaluated on a RING_UPSCALE x finer grid (~456²,
-     * one fine texel per ~2.4 screen px). Sub-texel precision comes from
+     * The band is now evaluated on a RING_UPSCALE x finer grid (~912²,
+     * one fine texel per ~1.2 screen px - round 23: at 4 texels the steep
+     * profile exposed raster steps on diagonals = "squarey/blocky" line).
+     * Sub-texel precision comes from
      * bilinearly interpolating the SIGNED coarse distance field (inside =
      * +dIn, outside = -dOut): its zero crossing falls BETWEEN coarse
      * texel centers - on the true boundary - so the ramp is sampled where
@@ -80,7 +82,7 @@ object MaskGeometry {
      * fine texels early-out on a NEAREST-texel gate, so the cost tracks
      * the band's area, not the full fine grid.
      */
-    const val RING_UPSCALE = 4
+    const val RING_UPSCALE = 8
 
     /**
      * Floor for the adaptive ramp (the "smaller, but not too small - there
@@ -429,90 +431,98 @@ object MaskGeometry {
         val fw = w * s
         val fh = h * s
         val scale = if (widthScale > 0f) widthScale else 1f
-        // Widest possible reach (both sides, min clamps, width scale) +1
-        // ramp falloff, expressed in chamfer units (texel unit = 3).
+        // Widest possible extent per side (both sides, min clamps, width
+        // scale), expressed in chamfer units (texel unit = 3).
         val maxAbs = (maxOf(RING_OUT_TEXELS, RING_IN_TEXELS) *
             maxOf(1f, scale) + 1f) * 3f
 
-        for (j in 0 until fh) {
-            // fine idx -> coarse coordinate: c = (2*i - (S-1)) / (2*S),
-            // exactly (i + 0.5)/S - 0.5, in floor-div integer math.
-            val numJ = 2 * j - (s - 1)
-            val cj = Math.floorDiv(numJ, 2 * s)
-            val fy = (numJ - cj * 2 * s) / (2f * s)
-            for (i in 0 until fw) {
-                val numI = 2 * i - (s - 1)
-                val ci = Math.floorDiv(numI, 2 * s)
-                val fx = (numI - ci * 2 * s) / (2f * s)
+        // ── boundary candidates (coarse) ───────────────────────────────────
+        // At S=8 the full fine grid is 831k texels; only texels near the
+        // boundary can ever carry band alpha, so the coarse grid decides
+        // first (16k cheap checks with an 8-unit gradient slack), and only
+        // candidate coarse blocks rasterize their 8x8 fine sub-block. Cost
+        // tracks the band's PERIMETER (~40k exact samples) instead of the
+        // full fine raster - this is what makes S=8 affordable.
+        val cand = BooleanArray(w * h)
+        for (idx in 0 until w * h) {
+            cand[idx] =
+                kotlin.math.abs(signedCoarse(pix, dIn, dOut, idx)) <= maxAbs + 8f
+        }
 
-                // Fast reject (the 208k-texel hot loop): the nearest block
-                // coarse texel, sampled first. The signed field's gradient
-                // is <= ~4.5 chamfer per coarse texel, and the bilinear 2x2
-                // sits within ~1.5 texels of it, so a slack of 8 guarantees
-                // anything this skips is genuinely beyond every reach - the
-                // boundary shell (all that can ever produce alpha) still
-                // pays for the exact bilinear sample below.
-                val near = (j / s) * w + (i / s)
-                if (kotlin.math.abs(signedCoarse(pix, dIn, dOut, near)) > maxAbs + 8f) continue
+        for (cy in 0 until h) {
+            val j0 = cy * s
+            for (cx in 0 until w) {
+                if (!cand[cy * w + cx]) continue
+                val i0 = cx * s
+                for (j in j0 until (j0 + s).coerceAtMost(fh)) {
+                    // fine idx -> coarse coordinate: c = (2*i - (S-1)) /
+                    // (2*S), exactly (i + 0.5)/S - 0.5, in floor-div math.
+                    val numJ = 2 * j - (s - 1)
+                    val cj = Math.floorDiv(numJ, 2 * s)
+                    val fy = (numJ - cj * 2 * s) / (2f * s)
+                    for (i in i0 until (i0 + s).coerceAtMost(fw)) {
+                        val numI = 2 * i - (s - 1)
+                        val ci = Math.floorDiv(numI, 2 * s)
+                        val fx = (numI - ci * 2 * s) / (2f * s)
 
-                // Signed distance at this fine texel: bilinear over the
-                // coarse 2x2; nearest texel when the 2x2 would leave the
-                // grid (band texels sit >1 coarse texel from the border,
-                // so this only matters at the very image edge).
-                val sv: Float
-                if (ci < 0 || cj < 0 || ci + 1 >= w || cj + 1 >= h) {
-                    if (ci < 0 || cj < 0 || ci >= w || cj >= h) continue
-                    sv = signedCoarse(pix, dIn, dOut, cj * w + ci)
-                } else {
-                    val v00 = signedCoarse(pix, dIn, dOut, cj * w + ci)
-                    val v10 = signedCoarse(pix, dIn, dOut, cj * w + ci + 1)
-                    val v01 = signedCoarse(pix, dIn, dOut, (cj + 1) * w + ci)
-                    val v11 = signedCoarse(pix, dIn, dOut, (cj + 1) * w + ci + 1)
-                    val top = v00 + (v10 - v00) * fx
-                    val bot = v01 + (v11 - v01) * fx
-                    sv = top + (bot - top) * fy
-                }
+                        // Signed distance: bilinear over the coarse 2x2;
+                        // nearest texel when the 2x2 would leave the grid
+                        // (only possible at the very image border).
+                        val sv: Float
+                        if (ci < 0 || cj < 0 || ci + 1 >= w || cj + 1 >= h) {
+                            if (ci < 0 || cj < 0 || ci >= w || cj >= h) continue
+                            sv = signedCoarse(pix, dIn, dOut, cj * w + ci)
+                        } else {
+                            val v00 = signedCoarse(pix, dIn, dOut, cj * w + ci)
+                            val v10 = signedCoarse(pix, dIn, dOut, cj * w + ci + 1)
+                            val v01 = signedCoarse(pix, dIn, dOut, (cj + 1) * w + ci)
+                            val v11 = signedCoarse(pix, dIn, dOut, (cj + 1) * w + ci + 1)
+                            val top = v00 + (v10 - v00) * fx
+                            val bot = v01 + (v11 - v01) * fx
+                            sv = top + (bot - top) * fy
+                        }
 
-                // Magnitude gate: nothing beyond the widest reach (and no
-                // +-BIG degenerate field) can ever produce band alpha.
-                val dist = kotlin.math.abs(sv)
-                if (dist > maxAbs) continue
-                val tt = dist / 3f
-                val solid = sv > 0f
-                // Owner size: nearest coarse texel (size varies slowly;
-                // only boundary-adjacent texels reach this point).
-                val cx = (i / s).coerceIn(0, w - 1)
-                val cy = (j / s).coerceIn(0, h - 1)
-                val size = if (solid) compSize[cy * w + cx] else outSize[cy * w + cx]
-                val kk =
-                    if (size <= 0) 0f
-                    else (kotlin.math.sqrt(size * INV_PI) / BAND_FULL_RADIUS)
-                        .coerceAtMost(1f)
-                val base =
-                    if (solid) {
-                        RING_IN_MIN_TEXELS +
-                            (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * kk
-                    } else {
-                        RING_OUT_MIN_TEXELS +
-                            (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * kk
+                        val dist = kotlin.math.abs(sv)
+                        if (dist > maxAbs) continue
+                        val tt = dist / 3f
+                        val solid = sv > 0f
+                        // Owner size: nearest coarse texel (size varies
+                        // slowly; only boundary texels reach this point).
+                        val size = if (solid) compSize[cy * w + cx] else outSize[cy * w + cx]
+                        val kk =
+                            if (size <= 0) 0f
+                            else (kotlin.math.sqrt(size * INV_PI) / BAND_FULL_RADIUS)
+                                .coerceAtMost(1f)
+                        val base =
+                            if (solid) {
+                                RING_IN_MIN_TEXELS +
+                                    (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * kk
+                            } else {
+                                RING_OUT_MIN_TEXELS +
+                                    (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * kk
+                            }
+                        // Per-side extent (coarse texels): adaptive base +
+                        // feather. At widthScale >= 1 identical to the
+                        // approved formula (base*scale + 1); below 1 the
+                        // feather shrinks too; MIN_EXTENT keeps the 10%
+                        // slider setting a visible hairline.
+                        val extent = (base * scale + minOf(scale, 1f))
+                            .coerceAtLeast(MIN_EXTENT)
+                        if (tt > extent) continue
+                        // COVERAGE: smoothstep over a ~2-fine-texel feather,
+                        // positioned by the SUB-TEXEL interpolated distance.
+                        // Because the terminator's POSITION is continuous
+                        // (not locked to texel borders) and its falloff is
+                        // smooth, diagonals curve cleanly - no staircase
+                        // notches ("squarey/blocky" report) - while the
+                        // feather stays ~2.4px, so the line still reads
+                        // sharp rather than blurred.
+                        val featherT = 2f / s
+                        val cov = ((extent - tt) / featherT).coerceIn(0f, 1f)
+                        val ra = (255f * cov * cov * (3f - 2f * cov)).toInt()
+                        if (ra > 0) ring[j * fw + i] = (ra shl 24) or 0x00FFFFFF
                     }
-                // Per-side extent (coarse texels): adaptive base + feather.
-                // At widthScale >= 1 this is EXACTLY the previously shipped
-                // extent (base * scale + 1) - the approved 150% max is
-                // unchanged. Below 1 the feather shrinks with the scale, so
-                // the line becomes genuinely hairline at low settings;
-                // MIN_EXTENT keeps it visible at the 10% slider floor.
-                val extent = (base * scale + minOf(scale, 1f))
-                    .coerceAtLeast(MIN_EXTENT)
-                if (tt > extent) continue
-                // SHARP profile: flat 255 across the line body, falling to
-                // 0 within ~1.5 fine texels (~3.6 screen px) at each end -
-                // crisp terminators on BOTH the outer and inner edge
-                // instead of the old full-width soft gradient that read as
-                // a blurred line (device report).
-                val featherT = 1.5f / s
-                val ra = (255f * ((extent - tt) / featherT)).toInt().coerceIn(0, 255)
-                if (ra > 0) ring[j * fw + i] = (ra shl 24) or 0x00FFFFFF
+                }
             }
         }
     }

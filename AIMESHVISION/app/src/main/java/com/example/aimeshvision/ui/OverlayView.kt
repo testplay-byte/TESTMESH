@@ -271,12 +271,25 @@ class OverlayView @JvmOverloads constructor(
                 if (maskAlpha > 0) {
                     // Pass 1 - meshes at full alpha.
                     val bc = meshBuffer(dirty)
+                    // CRITICAL: the buffer canvas OUTLIVES frames, and
+                    // clipRect INTERSECTS the current clip - without a
+                    // balanced save/restore the clip shrinks monotonically
+                    // to the intersection of every dirty rect ever seen
+                    // (canvas state leak): draws stop landing, the next
+                    // clear gets clipped too and stale content survives,
+                    // so the mesh fades to nothing while settings still
+                    // change ("mesh opacity dies when the outline is on /
+                    // accuracy dropped" device report). Save/restore every
+                    // use - the clear above runs before the clip, so it
+                    // always clears the full dirty rect.
+                    val save = bc.save()
                     bc.clipRect(dirty)
                     for (i in items.indices) {
                         val mask = items[i].maskBitmap ?: continue
                         drawTint(bc, mask, maskRectsPerItem[i],
                             DetectionStyle.colorFor(items[i].classId))
                     }
+                    bc.restoreToCount(save)
                     meshBlitPaint.alpha = maskAlpha
                     blitSrcRect.set(Math.round(dirty.left), Math.round(dirty.top),
                         Math.round(dirty.right), Math.round(dirty.bottom))
@@ -287,6 +300,7 @@ class OverlayView @JvmOverloads constructor(
                     // meshBuffer), blitted at outlineAlpha ON TOP of the
                     // mesh that is now already on the canvas.
                     val bc = meshBuffer(dirty)
+                    val save = bc.save()
                     bc.clipRect(dirty)
                     var anyRing = false
                     for (i in items.indices) {
@@ -298,6 +312,7 @@ class OverlayView @JvmOverloads constructor(
                         bc.drawBitmap(ring, null, maskRectsPerItem[i], outlinePaint)
                         anyRing = true
                     }
+                    bc.restoreToCount(save)
                     if (anyRing) {
                         meshBlitPaint.alpha = outlineAlpha
                         blitSrcRect.set(Math.round(dirty.left), Math.round(dirty.top),

@@ -395,37 +395,40 @@ class YoloPostProcessor(
 
     // ── bitmap pool (swap-on-return) ───────────────────────────────────────
     // Mesh + outline bitmaps are handed to the overlay and returned at the
-    // next setResults, so a single-slot-per-size pool reuses them instead
-    // of allocating a fresh 456x456 (830 KB) outline bitmap per detection
-    // per frame - the fine outline raster made per-frame allocation a real
-    // GC-churn risk. Inference thread acquires, main thread returns;
-    // [poolLock] is uncontended in practice (one decode at a time).
-    private class BmpSlot(var bmp: Bitmap? = null)
-
-    private val bitmapPool = HashMap<String, BmpSlot>()
+    // next setResults, so a per-size FREE LIST reuses them instead of
+    // allocating a fresh 912x912 (3.3 MB) outline bitmap per detection per
+    // frame. A single slot would have sufficed for one object, but a
+    // crowded scene holds MAX_FULL_DECODE bitmaps alive at once - hence a
+    // capped list per size (warm after the first few frames). Inference
+    // thread acquires, main thread returns; [poolLock] is uncontended in
+    // practice (one decode at a time). Over-cap returns simply go to GC.
+    private val bitmapPool = HashMap<String, ArrayList<Bitmap>>()
     private val poolLock = Any()
+
+    /** One full decode batch (masks + outlines) per size, + slack. */
+    private val POOL_CAP_PER_SIZE = 12
 
     /** Takes a cleared-or-fresh bitmap of the given size from the pool. */
     private fun acquireBitmap(w: Int, h: Int): Bitmap {
         val key = "$w x $h"
         synchronized(poolLock) {
-            val slot = bitmapPool[key]
-            val b = slot?.bmp
-            if (b != null && b.width == w && b.height == h) {
-                slot.bmp = null
-                return b
+            val list = bitmapPool[key]
+            if (list != null && list.isNotEmpty()) {
+                val b = list.removeAt(list.size - 1)
+                if (b.width == w && b.height == h) return b
+                // Wrong size (orientation/model change): drop it to GC.
             }
         }
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
     }
 
     /** Gives a bitmap back for the next frame to reuse (never recycled -
-     *  if the pool slot for its size is occupied it just goes to GC). */
+     *  an over-cap return just goes to GC normally). */
     private fun returnBitmap(b: Bitmap) {
         val key = "${b.width} x ${b.height}"
         synchronized(poolLock) {
-            val slot = bitmapPool.getOrPut(key) { BmpSlot() }
-            if (slot.bmp == null) slot.bmp = b
+            val list = bitmapPool.getOrPut(key) { ArrayList() }
+            if (list.size < POOL_CAP_PER_SIZE) list.add(b)
         }
     }
 

@@ -761,3 +761,23 @@ max over ALL solid centers instead of the NEAREST (it had been silently
 passing one-sided assertions).
 
 Version: AIMESHVISION **2.3** (versionCode 5) - release `aimeshvision-v2.3`.
+
+
+## 📐 Round 23 — canvas-state leak fix + truly smooth line (2026-10-09)
+
+Device report on v2.3: mesh opacity "goes to zero when the smooth outline
+is on" (had to turn the outline OFF to see the mesh), general accuracy
+regression, and the line is "squarey/blocky, not a proper smooth line".
+
+| Report | Root cause | Fix (file) |
+|---|---|---|
+| Mesh dies with outline on + "accuracy" drop | **Canvas state leak**: the offscreen buffer canvas OUTLIVES frames, and `clipRect` INTERSECTS the current clip with no save/restore anywhere in the pipeline (latent since round 16, masked while dirties were static/fullscreen) - the clip shrank monotonically to the intersection of every dirty rect ever seen: draws stopped landing, the next CLEAR got clipped too, stale full-alpha content survived and blitted over the frame. Always-compositing (round 22) made every scene vulnerable | `OverlayView.kt`: balanced `save()/restoreToCount()` around BOTH buffer passes, with a comment explaining the invariant (clear runs before the clip, so it always clears the full dirty rect) |
+| Line squarey/blocky | steep flat-top profile at 4x upscale exposed raster steps on diagonals (each ~2.4px texel step was a visible notch) | `MaskGeometry.kt`: **RING_UPSCALE 4 -> 8** (~912², 1.2 screen px/texel) + **smoothstep coverage over a 2-fine-texel feather positioned by the sub-texel interpolated distance** - terminator position is continuous (curves cleanly on diagonals), falloff is smooth, width still ~2.4px (reads sharp, not blurred) |
+| S=8 cost | full fine raster would be 831k texels/det | `MaskGeometry.kt`: **boundary-candidate blocks** - a 16k coarse pass marks texels within reach (8-unit gradient slack), only candidate blocks rasterize their 8x8 fine sub-block (~40k exact samples/det = perimeter-bound, cheaper than the old full-grid gate) |
+| 3.3MB x 6 fine bitmaps/frame churn | single-slot pool | `YoloPostProcessor.kt`: per-size **free list** (cap 12) - warm after the first frames, zero per-frame allocation in steady state |
+
+Tests: **14/14** - all depth/width/boundary assertions generalized to the
+upscale factor (no S=4 hard-coding), sharpness gate now allows the
+2-texel smoothstep feather (<=5 partial texels per cross-section).
+
+Version: AIMESHVISION **2.4** (versionCode 6) - release `aimeshvision-v2.4`.
