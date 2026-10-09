@@ -357,6 +357,19 @@ class YoloPostProcessor(
                         compSize, outSize, ringWidthScale)
                 }
 
+                // EXACT REGISTRATION (round 24, "mesh position slightly off
+                // with multiple hands"): publish the REAL proto-crop
+                // window as fractions - the bitmap's texel i maps to world
+                // (maskPadX + i)/protoW, which the draw must reproduce
+                // without pixel-rounded clamps. Previously the overlay
+                // pinned same-sized bitmaps to the whole-frame rect, a
+                // systematic ~1-proto-pixel scale error (and different
+                // per crop in split&detect, so groups registered against
+                // each other inconsistently).
+                det.maskLeft = maskPadX.toFloat() / protoW
+                det.maskTop = maskPadY.toFloat() / protoH
+                det.maskWidth = usableProtoW.toFloat() / protoW
+                det.maskHeight = usableProtoH.toFloat() / protoH
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)
                 det.maskBitmap = mask
                 if (fullDecode) {

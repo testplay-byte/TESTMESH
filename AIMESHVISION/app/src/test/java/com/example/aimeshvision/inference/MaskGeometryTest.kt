@@ -174,14 +174,15 @@ class MaskGeometryTest {
         // The lit run straddles the boundary (both sides present)...
         assertTrue("run [$first..$last] must cover boundary $boundary",
             first < boundary && last > boundary)
-        // ...with meaningful depth on both sides, expressed in coarse
-        // texels (x s fine texels): extent <= 2 coarse per side + falloff.
+        // ...with depth inside the profile envelope (ROUND-24 straddle):
+        // extents are 0.5..3 coarse + LINE_FEATHER tail; measured from the
+        // boundary (half-texel), per side <= extent + tail + 0.5 coarse.
         assertTrue("outer depth too small: ${boundary - first}",
             boundary - first >= 1.5f * s)
         assertTrue("inner depth too small: ${last - boundary}",
             last - boundary >= 0.75f * s)
-        assertTrue("run too deep outward", boundary - first <= 3.5f * s)
-        assertTrue("run too deep inward", last - boundary <= 2f * s)
+        assertTrue("run too deep outward", boundary - first <= 4.4f * s)
+        assertTrue("run too deep inward", last - boundary <= 2.5f * s)
     }
 
     // ── 1: solidity, corners, continuity ────────────────────────────────────
@@ -363,32 +364,78 @@ class MaskGeometryTest {
     // ── device reports (round 22): sharpness + thin minimum width ──────────
 
     @Test
-    fun rampEdgesAreSharpNotBlurred() {
+    fun lineIsASingleMonotoneStrokeAcrossTheEdge() {
         val f = field()
         fillSquare(f, 16, 16, 46, 46)
         pipeline(f, widthScale = 1f)
 
-        // Scan the same top-edge column as the contiguity test and count
-        // PARTIAL-alpha texels in the lit run. The sharp profile is flat
-        // 255 with a ~1.5-fine-texel feather, so each side may show at
-        // most ~1-2 intermediate values; the old full-width soft gradient
-        // had ~8 per side (the "blurred out" look).
         val col = (30 * s + s / 2)
         val boundary = 16f * s + (s - 1) / 2f
         val lo = (boundary - 4f * s).toInt().coerceAtLeast(0)
         val hi = (boundary + 4f * s).toInt().coerceAtMost(f.fh - 1)
-        var partial = 0
-        var peak = 0
-        for (j in lo..hi) {
-            val a = f.fineA(j * f.fw + col)
-            if (a in 1..249) partial++
-            if (a > peak) peak = a
+
+        val alphas = (lo..hi).map { f.fineA(it * f.fw + col) }
+        // Peak exists ON the straddling line.
+        assertEquals("peak 255", 255, alphas.max())
+        // ONE local maximum only - the "built with multiple lines" bug was
+        // two separate bright bands (one per side) around the silhouette.
+        // ONE bright REGION (contiguous run of alpha >= 200) - the old
+        // per-side-peak design produced TWO such regions with a dark
+        // hole between ("built with multiple lines"). Counting runs
+        // rather than strict turning points, so a plateau of equal
+        // values still reads as one region.
+        var brightRuns = 0
+        var inRun = false
+        for (a in alphas) {
+            val bright = a >= 200
+            if (bright && !inRun) { brightRuns++; inRun = true }
+            if (!bright) inRun = false
         }
-        assertEquals("flat-top peak present", 255, peak)
-        assertTrue(
-            "too many blurred (partial-alpha) texels: $partial",
-            partial <= 5,
-        )
+        assertEquals("exactly ONE line peak (not two bands)", 1, brightRuns)
+        // Contiguous: no internal 0-gap (holes = dashes / multiple
+        // segment illusion).
+        val first = alphas.indexOfFirst { it > 0 }
+        val last = alphas.indexOfLast { it > 0 }
+        assertTrue("no lit run found", first in 0 until last)
+        for (j in first..last) {
+            assertTrue("internal gap at $j", alphas[j] > 0)
+        }
+        // Monotone fall OUTWARD from the peak: no ringing / secondary
+        // bumps (a strict-edge gradient has that signature).
+        val peakIdx = alphas.withIndex().maxBy { it.value }.index
+        for (j in peakIdx until last + 1) {
+            if (j > peakIdx) {
+                assertTrue("outward ringing at $j", alphas[j] <= alphas[j - 1])
+            }
+        }
+    }
+
+    @Test
+    fun profileKernelStraddlesAtBoundaryWithoutSecondPeak() {
+        // Round-24 kernel truths (the plaid old design's death warrant):
+        // 1. alpha 255 AT the fitted boundary (fd = 0), monotonically
+        //    falls per side - there is never a second bright band at the
+        //    per-side extent (that produced two lines + a dark hole).
+        assertEquals(255, MaskGeometry.profileAlpha(0f, 3f, 1f))
+        var prev = 255
+        for (i in 1..140) {
+            val d = i * 0.05f
+            val a = MaskGeometry.profileAlpha(d, 3f, 1f)
+            assertTrue("must not rise past boundary: d=$d a=$a prev=$prev", a <= prev)
+            prev = a
+        }
+        // 2. At the OLD per-side peak location (extent), alpha has already
+        //    fallen well below max - no remnant plateau.
+        val atExtent = MaskGeometry.profileAlpha(3f, 3f, 1f)
+        assertTrue("alpha at extent must be mid-fall, got $atExtent", atExtent in 1..150)
+        // 3. Tail ends exactly at extent + LINE_FEATHER * min(scale,1):
+        //    zero beyond, and the <10% scale REALLY thins (device: hairline).
+        assertEquals(0, MaskGeometry.profileAlpha(3.95f, 3f, 1f))
+        assertEquals(0, MaskGeometry.profileAlpha(3.2f, 3f, 0.1f))
+        // 4. A narrow body's deep interior is line-free: fingers keep tint
+        //    ("mesh must stay visible").
+        assertEquals(0, MaskGeometry.profileAlpha(1.9f, 0.5f, 1f))
+        assertEquals(0, MaskGeometry.profileAlpha(6f, 3f, 1f))
     }
 
     @Test
@@ -412,12 +459,12 @@ class MaskGeometryTest {
         // depth (the MIN_EXTENT floor keeps it visible).
         assertEquals("hairline peak stays solid", 255, hair.maxRingAlpha())
         assertTrue("hairline has depth", hairDepth >= 1f)
-        // And bounded: per-side floor 0.5 coarse texel beyond the boundary
-        // (~1.5 coarse texels from the first solid centre incl. corners) -
-        // nowhere near the ~2.5 coarse of the default width.
+        // And bounded: at 10% the extent floor (0.5 coarse) + scaled tail
+        // (0.09) + corner diagonal keep it under ~2 coarse texels - far
+        // from the default width's depth.
         assertTrue(
             "hairline too fat: $hairDepth",
-            hairDepth <= 1.5f * s,
+            hairDepth <= 2f * s,
         )
     }
 }

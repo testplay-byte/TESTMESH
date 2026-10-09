@@ -781,3 +781,30 @@ upscale factor (no S=4 hard-coding), sharpness gate now allows the
 2-texel smoothstep feather (<=5 partial texels per cross-section).
 
 Version: AIMESHVISION **2.4** (versionCode 6) - release `aimeshvision-v2.4`.
+
+
+## 📐 Round 24 — mesh visible with outline, ONE smooth line, exact registration (2026-10-09)
+
+Device report on v2.4: mesh invisible when outline on; line "built with
+multiple lines", blocky/pixelated curves; mesh a bit "off" between the
+six hands.
+
+**Root-cause analysis (each report traced to a specific defect):**
+
+| Report | Root cause (verified in code) | Fix (file) |
+|---|---|---|
+| Mesh not visible with outline on / line looks like MULTIPLE lines | the previous profiles peaked a little INSIDE each per-side extent - on both sides of the boundary at once: two separate bright bands around the silhouette, a dark hole exactly on the mesh edge, and the inner band's high alpha reached INTO narrow bodies (fingers), washing their tint. Composition order also let the baked full-alpha ring sit against a low-alpha mesh | `MaskGeometry.profileAlpha` rewritten as a STRADDLE profile: 255 ON the boundary (d<=PEAK_DELTA=0.15), quadratic monotone fall per side to extent + tail - ONE line ON the silhouette; zero deep-interior alpha = fingers keep their mesh tint; `OverlayView` fused pass: mesh, then faint seam fill, then line - all baked at absolute alphas, ONE blit (order inside buffer guarantees line reaches where it draws) |
+| Blocky/pixelated curves | plateaus of all-255 locked to the raster lattice (any tie region aligns to texels) | the new profile has a SMALL peak core whose POSITION comes from the sub-texel interpolated distance, then a strict monotone quadratic fall - no plateau islands; plus the round-23 S=8 lattice (~1.2 screen px) remains |
+| Mesh position slightly off between six hands | mask bitmap spans the real proto window `(padX .. padX+usable)/proto` (fractional) but was pinned round-to-int to the whole-frame rect - systematic ~1-proto-pixel scale error, DIFFERENT per split&detect crop, so copies registered inconsistently | `Detection.maskLeft/Top/Width/Height` are now VARs stamped by the decoder with the EXACT fractional proto window, composed by `withCropMask` as (crop + window*cropSize)/frame; `maskRectFor` maps them losslessly; (decode also stamps for bbox-only decodes) |
+| Hairline at 10% still ~17 fine texels | fixed 0.9-texel feather dominated the thin setting | `profileAlpha(d, extent, scale)`: tail = LINE_FEATHER_COARSE * min(scale,1) - thin settings really thin, 100%+ unchanged |
+| (latent) glitchy rendering over time | round-23 fix stands: save/restore around every buffer pass | kept |
+
+**Verification:** MaskGeometryTest **15/15**, incl. new kernel truths:
+`profileKernelStraddlesAtBoundaryWithoutSecondPeak` (255 at d=0;
+monotone outward; zero beyond extent+tail; zero deep interior => narrow
+bodies keep mesh; zero at 10% past 3.2 texels) and
+`lineIsASingleMonotoneStrokeAcrossTheEdge` (ONE bright region across the
+scanline - the "multiple lines" detector; contiguous; single maximum;
+monotone fall).
+
+Version: AIMESHVISION **2.5** (versionCode 7) - release `aimeshvision-v2.5`.

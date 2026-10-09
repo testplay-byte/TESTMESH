@@ -29,17 +29,21 @@ data class Detection(
      */
     var outlineBitmap: Bitmap? = null,
     /**
-     * Normalized rect [0..1] of the SOURCE IMAGE that [maskBitmap] covers.
-     * Defaults cover the whole image (every full-frame mask); the split &
-     * detect refine path sets these to its crop window, so a crop mask with
-     * its own local geometry still maps to the right place on screen.
-     * Not part of equals/hashCode: like maskBitmap, this is a render cache,
-     * and identity within a frame comes from box/class/confidence.
+     * EXACT source rect [0..1, fractional] that [maskBitmap] covers:
+     * written by the decoder as the REAL proto-crop window
+     * (padX/protoW .. (padX+usableW)/protoW - the window that
+     * aligns the bitmap's texels with their world positions, no pixel
+     * rounding), and COMPOSED by the split&detect refine path with its
+     * crop window (crop multiplied by mask, divided by frame size). var,
+     * because the decoder stamps it
+     * after construction. Defaults 0/0/1/1 = whole source image.
+     * Not part of equals/hashCode: like maskBitmap, this is a render
+     * cache; frame identity comes from box/class/confidence.
      */
-    val maskLeft: Float = 0f,
-    val maskTop: Float = 0f,
-    val maskWidth: Float = 1f,
-    val maskHeight: Float = 1f,
+    var maskLeft: Float = 0f,
+    var maskTop: Float = 0f,
+    var maskWidth: Float = 1f,
+    var maskHeight: Float = 1f,
 ) {
     /** Mask coefficients participate in equality; bitmaps do not (mutable render cache). */
     override fun equals(other: Any?): Boolean = other is Detection &&

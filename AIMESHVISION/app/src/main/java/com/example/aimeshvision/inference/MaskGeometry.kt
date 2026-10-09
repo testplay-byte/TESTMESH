@@ -54,10 +54,9 @@ object MaskGeometry {
      * Full band half-widths in texels at [BAND_FULL_RADIUS] and above:
      * outer ramp fades over [RING_OUT_TEXELS] outside the silhouette,
      * inner ramp over [RING_IN_TEXELS] inside it (the band straddles the
-     * edge, peak 255 at the boundary texel).
+     * edge, peak 255 at the boundary texel). The RING_* domain constants
+     * are declared with the line kernel below (round 24).
      */
-    const val RING_OUT_TEXELS = 2f
-    const val RING_IN_TEXELS = 1f
 
     /**
      * Fine-grid upsample factor for the outline band (device report:
@@ -88,17 +87,113 @@ object MaskGeometry {
      * Floor for the adaptive ramp (the "smaller, but not too small - there
      * should be a limit" requirement): a component of any size keeps at
      * least this half-width, so the line never disappears or breaks on
-     * small objects.
+     * small objects. [MIN_EXTENT] is the per-side floor AFTER the user's
+     * outline-width multiplier (the slider goes down to 10%).
      *
-     * [MIN_EXTENT] is the per-side floor AFTER the user's outline-width
-     * multiplier: the settings slider goes down to 10%, and this keeps the
-     * thinnest setting a real (hairline ~9px total) line instead of an
-     * invisible one. Widths at or above 100% are unaffected - at >= 1 the
-     * extent formula is identical to the one the user approved at 150%.
+     * Line DOMAINS in coarse texels (round 24 - the analytic line):
+     *   body extent E per side = MIN + k*(MAX - MIN), k = component-radius
+     *   factor (see [coarseBase]); the width slider narrows E as
+     *   base*scale + 1 (>=1, the approved formula) or base*scale^2 + scale
+     *   (<1, real thinning). Alpha peaks (255) at
+     *   E - [PEAK_INSET] - ON the fitted boundary plane within a quarter
+     *   texel, and falls linearly to 0 at E + [LINE_FEATHER_COARSE].
+     * Because the peak's POSITION comes from the sub-texel interpolated
+     * distance, it is lattice-free: a curve crosses it at arbitrary
+     * subtexel offsets, so the line reads as ONE smooth stroke instead of
+     * boxing in texel islands ("blocky / built with multiple lines").
      */
     const val RING_OUT_MIN_TEXELS = 1f
+    const val RING_OUT_TEXELS = 2f
     const val RING_IN_MIN_TEXELS = 0.5f
+    const val RING_IN_TEXELS = 1f
     private const val MIN_EXTENT = 0.5f
+
+    /** Half-width of the flat 255 core ON the fitted boundary (texels) -
+     *  body of the line; small enough that its boundary walks with the
+     *  curve (lattice-free), large enough to survive quantization. */
+    const val PEAK_DELTA = 0.15f
+
+    /** Linear fall: peak to zero across this many coarse texels - short,
+     *  so the line reads sharp (never a wide soft skirt). */
+    const val LINE_FEATHER_COARSE = 0.9f
+
+    /**
+     * Per-side base extent (coarse texels) - PURE, part of the unit-tested
+     * line kernel ([MaskGeometryTest.profileKernelTests]). size <= 0 is the
+     * degenerate/no-component case: max base.
+     */
+    fun coarseBase(solid: Boolean, size: Float): Float {
+        val k = if (size <= 0f) 1f
+        else (kotlin.math.sqrt(size * INV_PI) / BAND_FULL_RADIUS).coerceAtMost(1f)
+        return if (solid) {
+            (RING_IN_MIN_TEXELS + (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * k)
+                .coerceIn(MIN_EXTENT, RING_IN_TEXELS)
+        } else {
+            (RING_OUT_MIN_TEXELS + (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * k)
+                .coerceIn(MIN_EXTENT, RING_OUT_TEXELS)
+        }
+    }
+
+    /**
+     * Adaptive + scale-aware base extent (coarse texels) - PURE.
+     * scale >= 1: base * scale + 1, IDENTICAL to the formula the user
+     * approved (the 150% maximum is untouched). scale < 1:
+     * base * scale^2 + scale - the body narrows ~quadratically so the
+     * slider actually thins the line at low settings, while the sharp-fall
+     * distance stays [LINE_FEATHER_COARSE]. Floored at [MIN_EXTENT].
+     */
+    fun coarseExtent(solid: Boolean, size: Float, scale: Float): Float {
+        val base = coarseBase(solid, size)
+        val sc = if (scale > 0f) scale else 1f
+        return if (sc >= 1f) {
+            base * sc + 1f
+        } else {
+            (base * sc * sc + sc).coerceAtLeast(MIN_EXTENT)
+        }
+    }
+
+    /**
+     * Line alpha from |signed distance| (texels) with the SIDE's extent
+     * (coarse texels) - PURE, the straddling smooth-line kernel
+     * ([MaskGeometryTest.profileKernelTests]):
+     *
+     *   a(d) = 255                        within [0, PEAK_DELTA]  (on/next
+     *                                      to the fitted boundary)
+     *         = 255 * (1 - u^2), u = (d - PEAK_DELTA)/(L - PEAK_DELTA)
+     *                                      for the rest, u in [0,1)
+     *   L = extent + LINE_FEATHER_COARSE   (per side)
+     *
+     * Properties this guarantees (each one fixes a direct device report):
+     *  - PEAK AT THE BOUNDARY (d=0): the boundary's own high-alpha zone is
+     *    continuous on BOTH sides - ONE line hugging the silhouette, never
+     *    two separate bands with a dark hole between them (the earlier
+     *    per-side "peak at extent" design literally produced two lines
+     *    around the mesh = the "built with multiple lines" report);
+     *  - MONOTONE OUTWARD: alpha falls all the way to 0 at L - the inner
+     *    arm reaches at most LINE-feather into the object, so narrow
+     *    bodies (fingers) keep their tint in the middle - the mesh stays
+     *    visible on objects with the outline on;
+     *  - QUADRATIC (smoothstep-friend): visually sharp terminator (the
+     *    "much alpha" derivatives vanish at u->1: clean, jitter-free edge)
+     *    without a flat 255-plateau island a raster lattice could lock to;
+     *  - POSITION: the boundary crossing comes from the sub-texel
+     *    interpolated signed distance - it walks the curve continuously,
+     *    independent of output quantization, so diagonals curve smoothly.
+     */
+    fun profileAlpha(dRaw: Float, extent: Float, scale: Float): Int {
+        // Tail length follows the width scale below 100% too - otherwise
+        // the fixed feather would dominate the 10% hairline setting and
+        // it would never actually get thin (device test: "min 50% not
+        // thin enough", then "16.9 fine texels of depth at 10%").
+        val tail = LINE_FEATHER_COARSE * if (scale < 1f) scale else 1f
+        val l = extent + tail
+        if (dRaw < 0f || dRaw >= l + 1e-6f) return 0
+        if (dRaw <= PEAK_DELTA) return 255
+        val u = (dRaw - PEAK_DELTA) / (l - PEAK_DELTA)
+        if (u >= 1f) return 0
+        val a = 255f * (1f - u * u)
+        return a.toInt().coerceIn(0, 255)
+    }
 
     /**
      * Component radius (texels) at which the band reaches full width.
@@ -433,8 +528,11 @@ object MaskGeometry {
         val scale = if (widthScale > 0f) widthScale else 1f
         // Widest possible extent per side (both sides, min clamps, width
         // scale), expressed in chamfer units (texel unit = 3).
-        val maxAbs = (maxOf(RING_OUT_TEXELS, RING_IN_TEXELS) *
-            maxOf(1f, scale) + 1f) * 3f
+        // Widest possible distance still yielding line alpha: extent can be
+        // up to RING_OUT_TEXELS * scale + 1 (max side); the profile tail is
+        // LINE_FEATHER_COARSE * min(scale, 1) - gate covers both + slack.
+        val maxAbs = (RING_OUT_TEXELS * maxOf(1f, scale) + 1f +
+            LINE_FEATHER_COARSE * minOf(scale, 1f)) * 3f
 
         // ── boundary candidates (coarse) ───────────────────────────────────
         // At S=8 the full fine grid is 831k texels; only texels near the
@@ -488,38 +586,15 @@ object MaskGeometry {
                         val solid = sv > 0f
                         // Owner size: nearest coarse texel (size varies
                         // slowly; only boundary texels reach this point).
-                        val size = if (solid) compSize[cy * w + cx] else outSize[cy * w + cx]
-                        val kk =
-                            if (size <= 0) 0f
-                            else (kotlin.math.sqrt(size * INV_PI) / BAND_FULL_RADIUS)
-                                .coerceAtMost(1f)
-                        val base =
-                            if (solid) {
-                                RING_IN_MIN_TEXELS +
-                                    (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * kk
-                            } else {
-                                RING_OUT_MIN_TEXELS +
-                                    (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * kk
-                            }
-                        // Per-side extent (coarse texels): adaptive base +
-                        // feather. At widthScale >= 1 identical to the
-                        // approved formula (base*scale + 1); below 1 the
-                        // feather shrinks too; MIN_EXTENT keeps the 10%
-                        // slider setting a visible hairline.
-                        val extent = (base * scale + minOf(scale, 1f))
-                            .coerceAtLeast(MIN_EXTENT)
-                        if (tt > extent) continue
-                        // COVERAGE: smoothstep over a ~2-fine-texel feather,
-                        // positioned by the SUB-TEXEL interpolated distance.
-                        // Because the terminator's POSITION is continuous
-                        // (not locked to texel borders) and its falloff is
-                        // smooth, diagonals curve cleanly - no staircase
-                        // notches ("squarey/blocky" report) - while the
-                        // feather stays ~2.4px, so the line still reads
-                        // sharp rather than blurred.
-                        val featherT = 2f / s
-                        val cov = ((extent - tt) / featherT).coerceIn(0f, 1f)
-                        val ra = (255f * cov * cov * (3f - 2f * cov)).toInt()
+                        val size = (if (solid) compSize[cy * w + cx]
+                            else outSize[cy * w + cx]).toFloat()
+                        // Adaptive + width-scale extent (>=1 keeps the exact
+                        // approved formula; <1 thins the body) + the
+                        // ANALYTICAL line profile - see [coarseExtent] and
+                        // [profileAlpha] (peak on the fitted boundary,
+                        // linear sharp fall; lattice-free by construction).
+                        val extent = coarseExtent(solid, size, scale)
+                        val ra = profileAlpha(dist / 3f, extent, scale)
                         if (ra > 0) ring[j * fw + i] = (ra shl 24) or 0x00FFFFFF
                     }
                 }
