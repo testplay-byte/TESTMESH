@@ -157,41 +157,39 @@ object MaskGeometry {
      * (coarse texels) - PURE, the straddling smooth-line kernel
      * ([MaskGeometryTest.profileKernelTests]):
      *
-     *   a(d) = 255                        within [0, PEAK_DELTA]  (on/next
-     *                                      to the fitted boundary)
-     *         = 255 * (1 - u^2), u = (d - PEAK_DELTA)/(L - PEAK_DELTA)
-     *                                      for the rest, u in [0,1)
-     *   L = extent + LINE_FEATHER_COARSE   (per side)
+     *   a(d) = 255                             d in [0, PEAK_DELTA]
+     *         = linear fall to 0 at L         (d in (PEAK_DELTA, L))
+     *   L = extent + LINE_FEATHER_COARSE * min(scale, 1)   (per side)
      *
-     * Properties this guarantees (each one fixes a direct device report):
-     *  - PEAK AT THE BOUNDARY (d=0): the boundary's own high-alpha zone is
-     *    continuous on BOTH sides - ONE line hugging the silhouette, never
-     *    two separate bands with a dark hole between them (the earlier
-     *    per-side "peak at extent" design literally produced two lines
-     *    around the mesh = the "built with multiple lines" report);
-     *  - MONOTONE OUTWARD: alpha falls all the way to 0 at L - the inner
-     *    arm reaches at most LINE-feather into the object, so narrow
+     * Properties (each one ties to a device report):
+     *  - PEAK ON THE BOUNDARY (d=0): continuous across sides - ONE line
+     *    hugging the silhouette, never two separate bands with a dark
+     *    hole between (the per-side-peak design produced exactly that =
+     *    "built with multiple lines");
+     *  - MONOTONE OUTWARD: alpha falls all the way to 0 at L, so narrow
      *    bodies (fingers) keep their tint in the middle - the mesh stays
-     *    visible on objects with the outline on;
-     *  - QUADRATIC (smoothstep-friend): visually sharp terminator (the
-     *    "much alpha" derivatives vanish at u->1: clean, jitter-free edge)
-     *    without a flat 255-plateau island a raster lattice could lock to;
-     *  - POSITION: the boundary crossing comes from the sub-texel
+     *    visible with the outline on;
+     *  - LINEAR fall (round 25, NOT quadratic): the previous quadratic
+     *    (1 - u^2) averaged ~1.45x more alpha across the tail than the
+     *    linear ramp the width slider was first calibrated against, so
+     *    identical extents read visibly FATTER / heavier - "outline width
+     *    issue is back". Linear restores the approved visual density;
+     *    without a flat 255 plateau, there is still no lattice-lockable
+     *    island for the raster to snap to;
+     *  - POSITION: the peak's location comes from the sub-texel
      *    interpolated signed distance - it walks the curve continuously,
      *    independent of output quantization, so diagonals curve smoothly.
      */
     fun profileAlpha(dRaw: Float, extent: Float, scale: Float): Int {
         // Tail length follows the width scale below 100% too - otherwise
         // the fixed feather would dominate the 10% hairline setting and
-        // it would never actually get thin (device test: "min 50% not
-        // thin enough", then "16.9 fine texels of depth at 10%").
+        // it would never actually get thin (device test: 16.9 fine
+        // texels of depth at 10%).
         val tail = LINE_FEATHER_COARSE * if (scale < 1f) scale else 1f
         val l = extent + tail
         if (dRaw < 0f || dRaw >= l + 1e-6f) return 0
         if (dRaw <= PEAK_DELTA) return 255
-        val u = (dRaw - PEAK_DELTA) / (l - PEAK_DELTA)
-        if (u >= 1f) return 0
-        val a = 255f * (1f - u * u)
+        val a = 255f * (l - dRaw) / (l - PEAK_DELTA)
         return a.toInt().coerceIn(0, 255)
     }
 

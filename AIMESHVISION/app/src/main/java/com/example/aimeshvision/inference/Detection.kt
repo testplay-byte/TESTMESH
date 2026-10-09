@@ -29,21 +29,22 @@ data class Detection(
      */
     var outlineBitmap: Bitmap? = null,
     /**
-     * EXACT source rect [0..1, fractional] that [maskBitmap] covers:
-     * written by the decoder as the REAL proto-crop window
-     * (padX/protoW .. (padX+usableW)/protoW - the window that
-     * aligns the bitmap's texels with their world positions, no pixel
-     * rounding), and COMPOSED by the split&detect refine path with its
-     * crop window (crop multiplied by mask, divided by frame size). var,
-     * because the decoder stamps it
-     * after construction. Defaults 0/0/1/1 = whole source image.
+     * Normalized rect [0..1] of the SOURCE IMAGE that [maskBitmap]
+     * covers. Defaults cover the whole image - which is CORRECT for
+     * full-frame decodes: parseOutput normalizes model coords over the
+     * USEFUL (letterbox-free) region, so the decoded usable area IS the
+     * entire source image (round 25: a "real proto window" stamp was
+     * tried in round 24 and pinned the mask ~10% inward per side -
+     * the squished-centered mesh / dead left+right zones report). The
+     * split&detect refine path sets these to its crop window, so a crop
+     * mask with its own local geometry maps to the right place too.
      * Not part of equals/hashCode: like maskBitmap, this is a render
      * cache; frame identity comes from box/class/confidence.
      */
-    var maskLeft: Float = 0f,
-    var maskTop: Float = 0f,
-    var maskWidth: Float = 1f,
-    var maskHeight: Float = 1f,
+    val maskLeft: Float = 0f,
+    val maskTop: Float = 0f,
+    val maskWidth: Float = 1f,
+    val maskHeight: Float = 1f,
 ) {
     /** Mask coefficients participate in equality; bitmaps do not (mutable render cache). */
     override fun equals(other: Any?): Boolean = other is Detection &&

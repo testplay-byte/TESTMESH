@@ -808,3 +808,25 @@ scanline - the "multiple lines" detector; contiguous; single maximum;
 monotone fall).
 
 Version: AIMESHVISION **2.5** (versionCode 7) - release `aimeshvision-v2.5`.
+
+
+## 📐 Round 25 - targeted reverts: squished mesh, opacity compound, fat width (2026-10-09)
+
+Device report on v2.5 (nothing else skipped): mesh invisible on the LEFT
+and RIGHT thirds - squished toward center, dimensions wrong on the hand;
+mesh-opacity compounding back; outline-width issue back; line still not
+smooth.
+
+**Root cause review of EVERY round-24 change, one by one (no scope creep):**
+
+| Round-24 change | Verdict | Evidence |
+|---|---|---|
+| Decoder stamps det.mask* = (pad/proto .. usable/proto) + crop composition ("fractional registration") | **REVERTED - this was the squish bug.** parseOutput normalizes detection coords over the UNLETTERBOXED region, so the usable decode area corresponds to the WHOLE source image; the CORRECT window is 0/0/1/1 (what shipped for 10 rounds and only had a "~1 proto pixel" theoretical concern). Stamping pad/proto_inpainted the mask ~10% per side: the left/right dead zones + wrong dimensions, worse when the hand was near an edge. Crisp window pins (~17px/texel quantization) are the proven baseline. | Detection.kt `val` fields restored; YoloPostProcessor stamp block replaced by the coordinate-map explanation; withCropMask back to straight crop |
+| Composited both layers at ABSOLUTE fit 1/4 alphas; adding one buffer draw | **REVERTED - this re-introduced the compounding bug it claimed to fix.** Partial-alpha draws at rotate through the buffer compound at hand hand again (the 6-hand 10% -> ~60% report). Round-23's proven composition REINSTATED: each layer draws FULL alpha, blit once per layer; seam underlay removed. | OverlayView two-pass block (v2.3/v2.4 layout) + save/restore preserved |
+| profile fall changed LINEAR -> quadratic (1-u^2) | **REVERTED - quadratic averaged ~1.45x more alpha across the tail**, making identical extents read visibly fatter/heavier (the width complaint). Linear fall restores the width-scale the slider was calibrated against; peak-on-boundary + monotone guarantees are UNAFFECTED (flat core you approved). | MaskGeometry.profileAlpha - linear fall to 0 at extent + LINE_FEATHER * min(scale,1) |
+
+**Not reverted (the root causes still stand):** straddle profile (peak ON boundary -> ONE line), S=8 raster + candidate-block budget, two-pass save/restore clip fix, per-size bitmap free-list, v2.3 settings layout.
+
+**Verification:** 15/15 tests green (single-bright-region canary, kernel truths incl. 255 at boundary / monotone / interior-clear / 10%-thin, contiguity envelope, registration class invariants).
+
+Version: AIMESHVISION **2.6** (versionCode 8) - release `aimeshvision-v2.6`.

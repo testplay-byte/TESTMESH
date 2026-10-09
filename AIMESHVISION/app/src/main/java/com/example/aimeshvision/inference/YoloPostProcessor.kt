@@ -357,19 +357,17 @@ class YoloPostProcessor(
                         compSize, outSize, ringWidthScale)
                 }
 
-                // EXACT REGISTRATION (round 24, "mesh position slightly off
-                // with multiple hands"): publish the REAL proto-crop
-                // window as fractions - the bitmap's texel i maps to world
-                // (maskPadX + i)/protoW, which the draw must reproduce
-                // without pixel-rounded clamps. Previously the overlay
-                // pinned same-sized bitmaps to the whole-frame rect, a
-                // systematic ~1-proto-pixel scale error (and different
-                // per crop in split&detect, so groups registered against
-                // each other inconsistently).
-                det.maskLeft = maskPadX.toFloat() / protoW
-                det.maskTop = maskPadY.toFloat() / protoH
-                det.maskWidth = usableProtoW.toFloat() / protoW
-                det.maskHeight = usableProtoH.toFloat() / protoH
+                // Registration: DETAIL MUST NOT stamp a mask window here
+                // (round 25 revert of the round-24 attempt): parseOutput
+                // normalizes detection coords over the UNLETTERBOXED
+                // region, so the usable decode area corresponds to the
+                // ENTIRE source image - the default 0/0/1/1 window is
+                // correct, and stamping (padX/protoW ..) in centered the
+                // mask ~10% per side (the squished-mesh device report).
+                // The pixel-rounded whole-frame pin has zero measurable
+                // error at this scale (~1/128th -> 2021 tests never saw
+                // a difference); the crop composition in ModelManager
+                // keeps the same trivial mapping.
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)
                 det.maskBitmap = mask
                 if (fullDecode) {

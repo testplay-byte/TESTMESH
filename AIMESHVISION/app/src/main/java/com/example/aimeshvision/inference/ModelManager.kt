@@ -450,37 +450,25 @@ class ModelManager {
     )
 
     /**
-     * Returns [det] (a crop-local detection) re-labelled so its mask covers
-     * the crop's exact source window: the mask bitmap itself is passed
-     * through untouched (the overlay maps maskLeft/Top/Width/Height), so
-     * there is NO resample and NO full-frame compositing canvas - a crop
-     * mask stays ~128px (~64 KB) whatever the crop size.
-     *
-     * ROUND-24 REGISTRATION: the decode already stamped det.mask* with
-     * its proto window INSIDE the crop frame - compose both: world =
-     * (crop + subwindow*cropSize)/frame, entirely in fractions. The old
-     * version dropped the subwindow and pixel-rounded the crop origin,
-     * so every refined mask sat ~1 proto-pixel off from its pass-1
-     * neighbor and then shifted AGAIN by crop iteration - the "mesh
-     * location slightly off between them" device report.
+     * Returns [det] (a crop-local detection) re-labelled so its mask
+     * covers the crop rect of the source image: the mask bitmap itself
+     * is passed through untouched (the overlay maps maskLeft/Top/
+     * Width/Height), so there is NO resample and NO full-frame
+     * compositing canvas - a crop mask stays ~128px (~64 KB) whatever
+     * the crop size. (Round 25: straight crop - the round-24 subwindow
+     * composition was reverted together with its wrong full-frame
+     * stamp - the decode's window IS the whole usable frame by
+     * parseOutput's coordinate map.)
      */
     private fun withCropMask(det: Detection, cx: Int, cy: Int, cw: Int, ch: Int,
-        fw: Int, fh: Int): Detection {
-        val cropL = cx.toFloat()
-        val cropT = cy.toFloat()
-        val cropW = cw.toFloat()
-        val cropH = ch.toFloat()
-        det.maskLeft = (cropL + det.maskLeft * cropW) / fw
-        det.maskTop = (cropT + det.maskTop * cropH) / fh
-        det.maskWidth = det.maskWidth * cropW / fw
-        det.maskHeight = det.maskHeight * cropH / fh
-        return Detection(
-            det.boundingBox, det.classId, det.confidence, det.label,
-            det.maskCoefficients, det.maskBitmap,
-            maskLeft = det.maskLeft, maskTop = det.maskTop,
-            maskWidth = det.maskWidth, maskHeight = det.maskHeight,
-        )
-    }
+        fw: Int, fh: Int): Detection = Detection(
+        det.boundingBox, det.classId, det.confidence, det.label,
+        det.maskCoefficients, det.maskBitmap,
+        maskLeft = cx.toFloat() / fw,
+        maskTop = cy.toFloat() / fh,
+        maskWidth = cw.toFloat() / fw,
+        maskHeight = ch.toFloat() / fh,
+    )
 
     /** IoU of two normalized boxes (cross-tile merge). */
     private fun iouNorm(a: RectF, b: RectF): Float {
