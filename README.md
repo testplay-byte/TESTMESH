@@ -708,3 +708,32 @@ Cutting a release (CI-only, no local builds):
    `softprops/action-gh-release@v2` creates the Release and attaches the
    APK. Regular `main` pushes keep producing the usual CI artifacts
    (`AIMESHVISION-debug/-release`, `MESHLABEL-debug/-release`).
+
+
+## 📐 Round 21 — high-resolution outline: the band leaves the mesh's grid (2026-10-09)
+
+Device report: **"the smooth mesh outline's resolution is way too low -
+it must not have the same low resolution as the mesh itself."**
+
+Root cause: the band was rasterized on the SAME grid as the mesh (~114²
+proto texels, one texel = ~9-10 SCREEN px). The mesh tint reads fine at
+that size, but a full-alpha bright LINE exposes every quantization step:
+corners locked to a ~9px staircase, ramp values only sampled at texel
+centers - i.e. the outline was structurally as coarse as the mesh.
+
+**Fix — the band now lives on its own fine grid:**
+
+| Piece | File | What |
+|---|---|---|
+| `RING_UPSCALE = 4` fine rasterizer | `inference/MaskGeometry.kt` | band bitmap is now `(w·4)×(h·4)` (~456², one fine texel ≈ 2.4 screen px). Sub-texel precision by **bilinearly interpolating the SIGNED coarse distance** (+dIn inside / −dOut outside): its zero-crossing sits BETWEEN texel centers - on the true boundary - so the ramp is sampled where the edge really is; the adaptive reach/widthScale ramp runs unchanged, per fine texel |
+| Cheap everywhere-except-the-edge cost | same | two-stage gate: nearest-texel `|signed| > maxReach+8` skips (one array read; slack covers the field's max gradient), then the exact bilinear only in the boundary shell |
+| Bitmap pool (swap-on-return) | `inference/YoloPostProcessor.kt`, `ui/OverlayView.kt`, `inference/ModelManager.kt` | the fine outline bitmaps (830KB) + masks are acquired from a per-size single-slot pool at decode and returned by the overlay at the next `setResults` (main thread, after the old list is dropped) - no per-frame bitmap allocation churn |
+| Resolution invariants | `MaskGeometryTest` | **12/12 green**: ring is `S²×` the mesh raster; a column crossing the edge is CONTIGUOUS (0 internal gaps) and straddles the boundary with bounded depth (≥6 / ≥3 fine texels, ≤14 / ≤7); plus all prior invariants (corners, adaptive, speckles, spill, width multiplier) |
+
+Coordinate note: mesh decode, speckles, chamfer sweeps and adaptive
+`compSize`/`outSize` stay on the coarse grid (correct - they define the
+boundary); only the VISIBLE ramp is upsampled. One boundary definition,
+both layers (double lines still unrepresentable).
+
+Version: AIMESHVISION **2.2** (versionCode 4) - released as
+`aimeshvision-v2.2` (arm64-v8a only, signed release APK).

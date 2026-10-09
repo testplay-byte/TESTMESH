@@ -15,13 +15,17 @@ import kotlin.math.sqrt
  * Pipeline order (driven by [YoloPostProcessor.decodeMasks]):
  *  1. [smoothMaskAlpha]  - blur passes + spill cutoff -> mesh silhouette
  *  2. [removeSpeckles]   - erase noise blobs, annotate component sizes
- *  3. [buildOutlineBand] - distance ramp around the FINAL silhouette
+ *  3. [buildOutlineBand] - distance ramp around the FINAL silhouette,
+ *     evaluated on a [RING_UPSCALE]x FINE grid (the outline must be
+ *     sharper than the mesh, never locked to its coarse texel grid)
  *
  * Invariants (each covered by a test):
  *  - ONE boundary definition serves mesh AND outline (the cutoff level
  *    set), so double lines / gaps between the two layers are unrepresentable;
  *  - the band peaks 255 AT the boundary and straddles it (half in, half
  *    out), so it is solid around corners and ON the edge by construction;
+ *  - the band runs on the FINE grid: contiguous (no 0<->255 steps in a
+ *    cross-section), corners covered at fine granularity;
  *  - band width is ADAPTIVE to component size with hard min/max limits -
  *    small objects get a proportionally thinner halo (the "small object
  *    grows a huge mesh" report) but never thinner than the floor, large
@@ -54,6 +58,29 @@ object MaskGeometry {
      */
     const val RING_OUT_TEXELS = 2f
     const val RING_IN_TEXELS = 1f
+
+    /**
+     * Fine-grid upsample factor for the outline band (device report:
+     * "outline resolution is way too low - it must not share the mesh's
+     * low resolution").
+     *
+     * The mesh silhouette lives on the 128px proto grid - one texel is
+     * ~9-10 SCREEN pixels - and the band used to be evaluated on that same
+     * grid, so the line path was locked to the mesh's coarse staircase
+     * (corners quantized in ~9px steps, visible as a chunky, "low-res"
+     * outline even though the mesh tint itself reads fine).
+     *
+     * The band is now evaluated on a RING_UPSCALE x finer grid (~456²,
+     * one fine texel per ~2.4 screen px). Sub-texel precision comes from
+     * bilinearly interpolating the SIGNED coarse distance field (inside =
+     * +dIn, outside = -dOut): its zero crossing falls BETWEEN coarse
+     * texel centers - on the true boundary - so the ramp is sampled where
+     * the edge really is, and the drawn line curves smoothly at ~2px
+     * granularity instead of stepping at ~9px. Deep-interior/exterior
+     * fine texels early-out on a NEAREST-texel gate, so the cost tracks
+     * the band's area, not the full fine grid.
+     */
+    const val RING_UPSCALE = 4
 
     /**
      * Floor for the adaptive ramp (the "smaller, but not too small - there
@@ -351,31 +378,123 @@ object MaskGeometry {
             }
         }
 
-        // Convert distances to an alpha ramp peaking at the boundary:
-        //   alpha(t) = 255 * clamp01((reach + 1 - t) / reach),  t in texels.
-        // The peak (t = 1 -> 255) is independent of reach, so even the
-        // narrowest adaptive band keeps a solid, unbroken line.
+        // Coarse fields are complete. The VISIBLE band is rasterized on
+        // the RING_UPSCALE x fine grid (helpers below) - a device report:
+        // the outline must not share the mesh's low resolution.
+        buildFineRing(pix, ring, w, h, dOut, dIn, compSize, outSize, widthScale)
+    }
+
+    // ── fine-grid band rasterization ──────────────────────────────────────
+    // The ring bitmap is (w*RING_UPSCALE) x (h*RING_UPSCALE); see the
+    // RING_UPSCALE doc for why. Only texels NEAR the boundary pay any
+    // cost: everything deeper is rejected by the magnitude gate below.
+
+    private const val BIG_DIST = 0x3fffffff
+
+    /**
+     * Signed coarse distance (texel units, 3-4 chamfer): positive INSIDE
+     * the mesh (+dIn), negative outside (-dOut). Its zero crossing is the
+     * mesh boundary, which sits BETWEEN texel centers - bilinearly
+     * interpolating it is what places the fine line sub-texel-accurately
+     * on the very same boundary the mesh tint uses (one level set, both
+     * layers). Unreached fields become +-BIG, which the magnitude gate
+     * rejects as "far from any boundary".
+     */
+    private fun signedCoarse(pix: IntArray, dIn: IntArray, dOut: IntArray, i: Int): Float =
+        if ((pix[i] ushr 24) >= MESH_ALPHA_CUTOFF) {
+            if (dIn[i] >= BIG_DIST) BIG_DIST.toFloat() else dIn[i].toFloat()
+        } else {
+            if (dOut[i] >= BIG_DIST) -BIG_DIST.toFloat() else -dOut[i].toFloat()
+        }
+
+    /**
+     * Rasterizes the visible band into the FINE [ring] (w*S x h*S):
+     * for every fine texel, sample the signed coarse field bilinearly
+     * (nearest texel outside the grid), reject anything farther from the
+     * boundary than the widest possible reach, then run the unchanged
+     * adaptive/reach ramp on that sub-texel distance.
+     */
+    private fun buildFineRing(
+        pix: IntArray, ring: IntArray, w: Int, h: Int,
+        dOut: IntArray, dIn: IntArray,
+        compSize: IntArray, outSize: IntArray,
+        widthScale: Float,
+    ) {
+        val s = RING_UPSCALE
+        val fw = w * s
+        val fh = h * s
         val scale = if (widthScale > 0f) widthScale else 1f
-        for (i in 0 until n) {
-            val solid = isSolid(pix, i)
-            val dist = if (solid) dIn[i] else dOut[i]
-            if (dist <= 0 || dist >= BIG) continue   // wrong side / unreached
-            val t = dist / 3f
-            val size = if (solid) compSize[i] else outSize[i]
-            val k =
-                if (size <= 0) 0f
-                else (sqrt(size * INV_PI) / BAND_FULL_RADIUS).coerceAtMost(1f)
-            val reach =
-                if (solid) {
-                    (RING_IN_MIN_TEXELS +
-                        (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * k) * scale
+        // Widest possible reach (both sides, min clamps, width scale) +1
+        // ramp falloff, expressed in chamfer units (texel unit = 3).
+        val maxAbs = (maxOf(RING_OUT_TEXELS, RING_IN_TEXELS) *
+            maxOf(1f, scale) + 1f) * 3f
+
+        for (j in 0 until fh) {
+            // fine idx -> coarse coordinate: c = (2*i - (S-1)) / (2*S),
+            // exactly (i + 0.5)/S - 0.5, in floor-div integer math.
+            val numJ = 2 * j - (s - 1)
+            val cj = Math.floorDiv(numJ, 2 * s)
+            val fy = (numJ - cj * 2 * s) / (2f * s)
+            for (i in 0 until fw) {
+                val numI = 2 * i - (s - 1)
+                val ci = Math.floorDiv(numI, 2 * s)
+                val fx = (numI - ci * 2 * s) / (2f * s)
+
+                // Fast reject (the 208k-texel hot loop): the nearest block
+                // coarse texel, sampled first. The signed field's gradient
+                // is <= ~4.5 chamfer per coarse texel, and the bilinear 2x2
+                // sits within ~1.5 texels of it, so a slack of 8 guarantees
+                // anything this skips is genuinely beyond every reach - the
+                // boundary shell (all that can ever produce alpha) still
+                // pays for the exact bilinear sample below.
+                val near = (j / s) * w + (i / s)
+                if (kotlin.math.abs(signedCoarse(pix, dIn, dOut, near)) > maxAbs + 8f) continue
+
+                // Signed distance at this fine texel: bilinear over the
+                // coarse 2x2; nearest texel when the 2x2 would leave the
+                // grid (band texels sit >1 coarse texel from the border,
+                // so this only matters at the very image edge).
+                val sv: Float
+                if (ci < 0 || cj < 0 || ci + 1 >= w || cj + 1 >= h) {
+                    if (ci < 0 || cj < 0 || ci >= w || cj >= h) continue
+                    sv = signedCoarse(pix, dIn, dOut, cj * w + ci)
                 } else {
-                    (RING_OUT_MIN_TEXELS +
-                        (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * k) * scale
-                }.coerceAtLeast(ABS_MIN_REACH)
-            if (t > reach + 1f) continue
-            val ra = (255f * ((reach + 1f - t) / reach)).toInt().coerceIn(0, 255)
-            if (ra > 0) ring[i] = (ra shl 24) or 0x00FFFFFF
+                    val v00 = signedCoarse(pix, dIn, dOut, cj * w + ci)
+                    val v10 = signedCoarse(pix, dIn, dOut, cj * w + ci + 1)
+                    val v01 = signedCoarse(pix, dIn, dOut, (cj + 1) * w + ci)
+                    val v11 = signedCoarse(pix, dIn, dOut, (cj + 1) * w + ci + 1)
+                    val top = v00 + (v10 - v00) * fx
+                    val bot = v01 + (v11 - v01) * fx
+                    sv = top + (bot - top) * fy
+                }
+
+                // Magnitude gate: nothing beyond the widest reach (and no
+                // +-BIG degenerate field) can ever produce band alpha.
+                val dist = kotlin.math.abs(sv)
+                if (dist > maxAbs) continue
+                val tt = dist / 3f
+                val solid = sv > 0f
+                // Owner size: nearest coarse texel (size varies slowly;
+                // only boundary-adjacent texels reach this point).
+                val cx = (i / s).coerceIn(0, w - 1)
+                val cy = (j / s).coerceIn(0, h - 1)
+                val size = if (solid) compSize[cy * w + cx] else outSize[cy * w + cx]
+                val kk =
+                    if (size <= 0) 0f
+                    else (kotlin.math.sqrt(size * INV_PI) / BAND_FULL_RADIUS)
+                        .coerceAtMost(1f)
+                val reach =
+                    if (solid) {
+                        (RING_IN_MIN_TEXELS +
+                            (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * kk) * scale
+                    } else {
+                        (RING_OUT_MIN_TEXELS +
+                            (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * kk) * scale
+                    }.coerceAtLeast(ABS_MIN_REACH)
+                if (tt > reach + 1f) continue
+                val ra = (255f * ((reach + 1f - tt) / reach)).toInt().coerceIn(0, 255)
+                if (ra > 0) ring[j * fw + i] = (ra shl 24) or 0x00FFFFFF
+            }
         }
     }
 }

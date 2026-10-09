@@ -253,9 +253,14 @@ class YoloPostProcessor(
         val pixels = IntArray(usableProtoW * usableProtoH)
         // Scratch for the mesh smoothing filter (alpha-only blur passes).
         val blurTmp = IntArray(usableProtoW * usableProtoH)
-        // Scratch for the outline band (zeroed per detection) + the two
-        // chamfer distance fields it is computed from.
-        val ring = IntArray(usableProtoW * usableProtoH)
+        // Scratch for the outline band + the two chamfer distance fields it
+        // is computed from. The band raster is RING_UPSCALE x finer than the
+        // mesh (the outline must NOT share the mesh's low resolution - it is
+        // drawn to the same full-frame rect, so 4x texels = a ~2.4-screen-px
+        // line path instead of the mesh's ~9px staircase).
+        val ringW = usableProtoW * MaskGeometry.RING_UPSCALE
+        val ringH = usableProtoH * MaskGeometry.RING_UPSCALE
+        val ring = IntArray(ringW * ringH)
         val distOut = IntArray(usableProtoW * usableProtoH)
         val distIn = IntArray(usableProtoW * usableProtoH)
         // Scratch for the speckle filter (flood fill: stack + seen + component).
@@ -283,7 +288,8 @@ class YoloPostProcessor(
                 java.util.Arrays.fill(pixels, 0)
                 java.util.Arrays.fill(ring, 0)
                 java.util.Arrays.fill(compSize, 0)
-                val mask = Bitmap.createBitmap(usableProtoW, usableProtoH, Bitmap.Config.ARGB_8888)
+                java.util.Arrays.fill(outSize, 0)
+                val mask = acquireBitmap(usableProtoW, usableProtoH)
                 det.outlineBitmap = null
 
                 // Bbox bounds for the bbox-only fallback path.
@@ -354,10 +360,8 @@ class YoloPostProcessor(
                 mask.setPixels(pixels, 0, usableProtoW, 0, 0, usableProtoW, usableProtoH)
                 det.maskBitmap = mask
                 if (fullDecode) {
-                    val outline = Bitmap.createBitmap(usableProtoW, usableProtoH,
-                        Bitmap.Config.ARGB_8888)
-                    outline.setPixels(ring, 0, usableProtoW, 0, 0,
-                        usableProtoW, usableProtoH)
+                    val outline = acquireBitmap(ringW, ringH)
+                    outline.setPixels(ring, 0, ringW, 0, 0, ringW, ringH)
                     det.outlineBitmap = outline
                 }
             } catch (e: Exception) {
@@ -387,5 +391,54 @@ class YoloPostProcessor(
         val union = (a.right - a.left) * (a.bottom - a.top) +
             (b.right - b.left) * (b.bottom - b.top) - intersect
         return if (union <= 0f) 0f else intersect / union
+    }
+
+    // ── bitmap pool (swap-on-return) ───────────────────────────────────────
+    // Mesh + outline bitmaps are handed to the overlay and returned at the
+    // next setResults, so a single-slot-per-size pool reuses them instead
+    // of allocating a fresh 456x456 (830 KB) outline bitmap per detection
+    // per frame - the fine outline raster made per-frame allocation a real
+    // GC-churn risk. Inference thread acquires, main thread returns;
+    // [poolLock] is uncontended in practice (one decode at a time).
+    private class BmpSlot(var bmp: Bitmap? = null)
+
+    private val bitmapPool = HashMap<String, BmpSlot>()
+    private val poolLock = Any()
+
+    /** Takes a cleared-or-fresh bitmap of the given size from the pool. */
+    private fun acquireBitmap(w: Int, h: Int): Bitmap {
+        val key = "$w x $h"
+        synchronized(poolLock) {
+            val slot = bitmapPool[key]
+            val b = slot?.bmp
+            if (b != null && b.width == w && b.height == h) {
+                slot.bmp = null
+                return b
+            }
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    /** Gives a bitmap back for the next frame to reuse (never recycled -
+     *  if the pool slot for its size is occupied it just goes to GC). */
+    private fun returnBitmap(b: Bitmap) {
+        val key = "${b.width} x ${b.height}"
+        synchronized(poolLock) {
+            val slot = bitmapPool.getOrPut(key) { BmpSlot() }
+            if (slot.bmp == null) slot.bmp = b
+        }
+    }
+
+    /**
+     * Returns the previous frame's mask/outline bitmaps to the pool.
+     * Called by the overlay at setResults time, AFTER it has dropped the
+     * old list and while it is still on the main thread (no draw can be
+     * using them concurrently - onDraw is main-thread too).
+     */
+    fun returnPrevious(results: List<Detection>) {
+        for (d in results) {
+            d.maskBitmap?.let { returnBitmap(it) }
+            d.outlineBitmap?.let { returnBitmap(it) }
+        }
     }
 }

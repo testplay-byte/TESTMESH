@@ -165,9 +165,21 @@ class OverlayView @JvmOverloads constructor(
         xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
     }
 
+    /**
+     * Called when the old results are dropped, so their mask/outline
+     * bitmaps can go back to the decode pool (swap-on-return; wired by
+     * MainActivity to ModelManager.returnPrevious).
+     */
+    var onReleaseResults: ((List<Detection>) -> Unit)? = null
+
     /** Called once per inference result: caches results, then redraws. */
     fun setResults(results: List<Detection>, inputWidth: Int, inputHeight: Int) {
         val perfT = Perf.start()
+        // Return the PREVIOUS frame's bitmaps first - they are off-screen
+        // the moment `prepared` is replaced, and onDraw cannot interleave
+        // with this (same thread).
+        val prev = prepared
+        if (prev.isNotEmpty()) onReleaseResults?.invoke(prev)
         sourceImageWidth = inputWidth
         sourceImageHeight = inputHeight
         prepared = results
@@ -186,6 +198,8 @@ class OverlayView @JvmOverloads constructor(
     }
 
     fun clear() {
+        val prev = prepared
+        if (prev.isNotEmpty()) onReleaseResults?.invoke(prev)
         prepared = emptyList()
         invalidate()
     }

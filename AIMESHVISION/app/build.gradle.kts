@@ -23,8 +23,8 @@ android {
         applicationId = "com.example.aimeshvision"
         minSdk = 31
         targetSdk = 36
-        versionCode = 3
-        versionName = "2.1"
+        versionCode = 4
+        versionName = "2.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // arm64-v8a ONLY (user directive): the only device target in use.

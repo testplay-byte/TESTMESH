@@ -224,6 +224,9 @@ class MainActivity : AppCompatActivity() {
         bindViews()
         updateModelNameHeader()
         overlayView.showBoxes = prefs.getBoolean(PREF_SHOW_BOXES, true)
+        // Bitmap swap-on-return: when the overlay drops old results, their
+        // mask/outline bitmaps go back to the decode pool instead of the GC.
+        overlayView.onReleaseResults = { prev -> modelManager.returnPrevious(prev) }
         overlayView.showSmoothOutline = prefs.getBoolean(PREF_SMOOTH, false)
         modelManager.tileInferenceEnabled = prefs.getBoolean(PREF_TILE, false)
         // MESH & OUTLINE knobs: stored as pct (except passes), applied live.

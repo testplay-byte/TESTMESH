@@ -110,6 +110,12 @@ class ModelManager {
 
     val isReady: Boolean get() = !closed.get() && interpreter != null
 
+    /**
+     * Returns a previous frame's mask/outline bitmaps to the decode pool
+     * (called by the overlay when it drops the old results).
+     */
+    fun returnPrevious(results: List<Detection>) = postProcessor.returnPrevious(results)
+
     /** Size of the loaded model file in bytes (0 when nothing is loaded). */
     val modelFileSizeBytes: Long get() = currentModelFile?.length() ?: 0L
 
