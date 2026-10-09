@@ -597,7 +597,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val ringPct = (modelManager.ringWidthScale * 100).toInt()
-        sliderRingWidth.value = ringPct.coerceIn(50, 150).toFloat()
+        sliderRingWidth.value = ringPct.coerceIn(10, 150).toFloat()
         tvRingWidthValue.text = "$ringPct%"
         sliderRingWidth.addOnChangeListener { _, value, fromUser ->
             val pct = value.toInt()

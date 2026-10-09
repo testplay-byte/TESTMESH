@@ -86,12 +86,17 @@ object MaskGeometry {
      * Floor for the adaptive ramp (the "smaller, but not too small - there
      * should be a limit" requirement): a component of any size keeps at
      * least this half-width, so the line never disappears or breaks on
-     * small objects. [ABS_MIN_REACH] is the last-resort clamp after the
-     * user's outline-width multiplier.
+     * small objects.
+     *
+     * [MIN_EXTENT] is the per-side floor AFTER the user's outline-width
+     * multiplier: the settings slider goes down to 10%, and this keeps the
+     * thinnest setting a real (hairline ~9px total) line instead of an
+     * invisible one. Widths at or above 100% are unaffected - at >= 1 the
+     * extent formula is identical to the one the user approved at 150%.
      */
     const val RING_OUT_MIN_TEXELS = 1f
     const val RING_IN_MIN_TEXELS = 0.5f
-    private const val ABS_MIN_REACH = 0.4f
+    private const val MIN_EXTENT = 0.5f
 
     /**
      * Component radius (texels) at which the band reaches full width.
@@ -483,16 +488,30 @@ object MaskGeometry {
                     if (size <= 0) 0f
                     else (kotlin.math.sqrt(size * INV_PI) / BAND_FULL_RADIUS)
                         .coerceAtMost(1f)
-                val reach =
+                val base =
                     if (solid) {
-                        (RING_IN_MIN_TEXELS +
-                            (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * kk) * scale
+                        RING_IN_MIN_TEXELS +
+                            (RING_IN_TEXELS - RING_IN_MIN_TEXELS) * kk
                     } else {
-                        (RING_OUT_MIN_TEXELS +
-                            (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * kk) * scale
-                    }.coerceAtLeast(ABS_MIN_REACH)
-                if (tt > reach + 1f) continue
-                val ra = (255f * ((reach + 1f - tt) / reach)).toInt().coerceIn(0, 255)
+                        RING_OUT_MIN_TEXELS +
+                            (RING_OUT_TEXELS - RING_OUT_MIN_TEXELS) * kk
+                    }
+                // Per-side extent (coarse texels): adaptive base + feather.
+                // At widthScale >= 1 this is EXACTLY the previously shipped
+                // extent (base * scale + 1) - the approved 150% max is
+                // unchanged. Below 1 the feather shrinks with the scale, so
+                // the line becomes genuinely hairline at low settings;
+                // MIN_EXTENT keeps it visible at the 10% slider floor.
+                val extent = (base * scale + minOf(scale, 1f))
+                    .coerceAtLeast(MIN_EXTENT)
+                if (tt > extent) continue
+                // SHARP profile: flat 255 across the line body, falling to
+                // 0 within ~1.5 fine texels (~3.6 screen px) at each end -
+                // crisp terminators on BOTH the outer and inner edge
+                // instead of the old full-width soft gradient that read as
+                // a blurred line (device report).
+                val featherT = 1.5f / s
+                val ra = (255f * ((extent - tt) / featherT)).toInt().coerceIn(0, 255)
                 if (ra > 0) ring[j * fw + i] = (ra shl 24) or 0x00FFFFFF
             }
         }

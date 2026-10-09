@@ -401,7 +401,7 @@
             android:id="@+id/sliderRingWidth"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:valueFrom="50"
+            android:valueFrom="10"
             android:valueTo="150"
             android:stepSize="1"
             android:value="100"

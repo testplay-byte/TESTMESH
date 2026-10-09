@@ -97,8 +97,9 @@ class MaskGeometryTest {
 
     /**
      * Depth of the band OUTSIDE the object, in FINE texels: the farthest
-     * lit exterior fine texel's Euclidean distance to the nearest solid
-     * coarse texel center (mapped into fine coordinates).
+     * lit exterior fine texel's distance to the NEAREST solid coarse texel
+     * center (each lit texel first finds its own nearest center - the max
+     * is then taken over those minima).
      */
     private fun outerDepth(f: Field): Float {
         val cs = s.toFloat()
@@ -112,12 +113,14 @@ class MaskGeometryTest {
         var best = 0f
         for (j in 0 until f.fh) for (i in 0 until f.fw) {
             if (f.solid(i / s, j / s) || f.fineA(j * f.fw + i) <= 0) continue
+            var nearest = Float.MAX_VALUE
             for ((sx, sy) in solids) {
                 val dx = i - sx
                 val dy = j - sy
                 val d = kotlin.math.sqrt(dx * dx + dy * dy)
-                if (d > best) best = d
+                if (d < nearest) nearest = d
             }
+            if (nearest > best) best = nearest
         }
         return best
     }
@@ -248,11 +251,12 @@ class MaskGeometryTest {
         // ... but with a FLOOR: the line still exists at full peak alpha.
         assertEquals("small line peak stays solid", 255, small.maxRingAlpha())
         assertTrue("small band has depth", smallDepth >= 1f)
-        // Large object reaches the full classic width: 2 coarse texels +
-        // falloff ~= 2.67 texels of euclid depth = ~10.7 FINE texels.
+        // Large object reaches the full classic width: extent 2 coarse
+        // texels from the boundary (0.5 from the first solid centre) =
+        // ~2.47 coarse ~= 9.9 FINE texels of depth.
         assertTrue(
             "large depth $largeDepth near full reach",
-            largeDepth >= 2.67f * s,
+            largeDepth >= 2.25f * s,
         )
     }
 
@@ -353,5 +357,67 @@ class MaskGeometryTest {
         val f = field()
         pipeline(f)
         for (i in f.ring.indices) assertEquals(0, f.ring[i])
+    }
+
+    // ── device reports (round 22): sharpness + thin minimum width ──────────
+
+    @Test
+    fun rampEdgesAreSharpNotBlurred() {
+        val f = field()
+        fillSquare(f, 16, 16, 46, 46)
+        pipeline(f, widthScale = 1f)
+
+        // Scan the same top-edge column as the contiguity test and count
+        // PARTIAL-alpha texels in the lit run. The sharp profile is flat
+        // 255 with a ~1.5-fine-texel feather, so each side may show at
+        // most ~1-2 intermediate values; the old full-width soft gradient
+        // had ~8 per side (the "blurred out" look).
+        val col = (30 * s + s / 2)
+        val boundary = 16f * s + 1.5f
+        val lo = (boundary - 20f).toInt().coerceAtLeast(0)
+        val hi = (boundary + 20f).toInt().coerceAtMost(f.fh - 1)
+        var partial = 0
+        var peak = 0
+        for (j in lo..hi) {
+            val a = f.fineA(j * f.fw + col)
+            if (a in 1..249) partial++
+            if (a > peak) peak = a
+        }
+        assertEquals("flat-top peak present", 255, peak)
+        assertTrue(
+            "too many blurred (partial-alpha) texels: $partial",
+            partial <= 3,
+        )
+    }
+
+    @Test
+    fun tenPercentWidthIsHairlineButStillASolidLine() {
+        val full = field()
+        fillSquare(full, 16, 16, 46, 46)
+        pipeline(full, widthScale = 1f)
+
+        val hair = field()
+        fillSquare(hair, 16, 16, 46, 46)
+        pipeline(hair, widthScale = 0.1f)   // slider minimum (10%)
+
+        // The 10% line must be MUCH thinner than default...
+        val fullDepth = outerDepth(full)
+        val hairDepth = outerDepth(hair)
+        assertTrue(
+            "hairline depth $hairDepth not thinner than default $fullDepth",
+            hairDepth < fullDepth * 0.5f,
+        )
+        // ...but still a real, solid line: peak alpha 255 and measurable
+        // depth (the MIN_EXTENT floor keeps it visible).
+        assertEquals("hairline peak stays solid", 255, hair.maxRingAlpha())
+        assertTrue("hairline has depth", hairDepth >= 1f)
+        // And bounded: per-side floor 0.5 coarse texel beyond the boundary
+        // (cardinal ~4 fine texels from the first solid centre; square
+        // corners add a diagonal component) - nowhere near the ~10 of the
+        // default width.
+        assertTrue(
+            "hairline too fat: $hairDepth",
+            hairDepth <= 6f,
+        )
     }
 }

@@ -737,3 +737,27 @@ both layers (double lines still unrepresentable).
 
 Version: AIMESHVISION **2.2** (versionCode 4) - released as
 `aimeshvision-v2.2` (arm64-v8a only, signed release APK).
+
+
+## 📐 Round 22 — sharp line, hairline minimum, exact opacity at any object count (2026-10-09)
+
+Device report on v2.2: (1) outline smoother now but should be **sharper**,
+not blurred, on BOTH the outer and inner edge; (2) outline-width minimum
+of 50% is **not thin enough** - max is perfect, keep it; (3) with a
+six-hand image, mesh opacity 10% read as **~60%** and the outline width
+"combined" - settings were compounding across detections.
+
+| Report | Root cause | Fix (file) |
+|---|---|---|
+| Blurred edges | ramp alpha faded linearly across the WHOLE band width (~9px of soft gradient per side) | `MaskGeometry.kt`: **flat-top profile** - solid 255 across the body, falling to 0 within ~1.5 fine texels (~3.6px) at each end: crisp terminators outer + inner, still antialiased |
+| Min width 50% too fat | extent had a fixed "+1 texel" term: even scaled to 0 the line stayed ~10px+ per side | `MaskGeometry.kt`: extent = `base*scale + min(scale,1)` - **identical to the approved formula at >=100% (150% max untouched)**, feather shrinks with the scale below it; `MIN_EXTENT=0.5` floor keeps the 10% setting a real hairline. Slider `bottom_sheet_settings.xml` 50->**10%** (`MainActivity.kt` coercion) |
+| Settings combine with multiple objects | outlines were drawn per-detection as DIRECT translucent draws (ramp tails SUM at crossings -> wider/brighter around groups), and the mesh kept a rect-based "fast route" that could stack when masks bled outside their bbox test | `OverlayView.kt`: **both layers now composited at full alpha into the buffer and blitted ONCE** at maskAlpha/outlineAlpha (two passes over the dirty union, `CONTENT_PAD_PX` 24->48 so the wider band is never clipped). One blit per layer = the slider value is applied exactly once, for 1 mask or 6. The overlap fast-route + `haveOverlap` are gone (correctness first; cost bounded by the bbox+pad union) |
+
+**Verification:** MaskGeometryTest **14/14** - new invariants: `rampEdgesAreSharpNotBlurred`
+(<=3 partial-alpha texels in a column cross-section; peak 255) and
+`tenPercentWidthIsHairlineButStillASolidLine` (10% depth < half of default,
+peak 255, bounded). Also fixed the test helper `outerDepth` which took the
+max over ALL solid centers instead of the NEAREST (it had been silently
+passing one-sided assertions).
+
+Version: AIMESHVISION **2.3** (versionCode 5) - release `aimeshvision-v2.3`.

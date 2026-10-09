@@ -49,13 +49,15 @@ import com.example.aimeshvision.util.Perf
  * device rounds: missing lines, double lines, spikes chasing noise, jitter.
  *
  * Rendering per frame ([onDraw]):
- *  1. Mesh: direct translucent draw for non-overlapping masks; the offscreen
- *     composite (full-alpha buffer blitted once at maskAlpha) only when
- *     masks OVERLAP, scoped to the dirty union rect - overlapping alpha can
- *     never compound toward opacity (the ten-hands solid-mesh bug).
- *  2. Outline (toggle): one band bitmap draw per detection, direct.
- *  3. Optional bounding box + corner brackets (user toggle).
- *  4. Label chip always anchored to the box top (both toggle states).
+ *  1. Mesh AND outline are each composited into the offscreen buffer at
+ *     FULL alpha and blitted ONCE at their settings value (maskAlpha /
+ *     outlineAlpha), scoped to the dirty union rect. One blit per layer
+ *     is what makes the opacity sliders exact for any object count:
+ *     same-colour masks are idempotent in the buffer (the ten-hands
+ *     bug), and outline ramps saturate at 255 instead of summing at
+ *     crossings (the "settings combine with multiple objects" report).
+ *  2. Optional bounding box + corner brackets (user toggle).
+ *  3. Label chip always anchored to the box top (both toggle states).
  *
  * Split & detect crops map through [maskRectFor] (Detection carries the
  * normalized source rect its mask covers).
@@ -77,9 +79,11 @@ class OverlayView @JvmOverloads constructor(
         private const val LABEL_PADDING = 10f
         private const val LABEL_CORNER_R = 14f
 
-        // Screen px added around each bbox when computing mask content rects
-        // (decode feather + minor spill) for the overlap fast-path test.
-        private const val CONTENT_PAD_PX = 24f
+        // Screen px added around each bbox when computing the dirty-union
+        // rect for the composite blit. Must cover the widest possible
+        // outline extent (RING_OUT ~2 coarse texels + falloff ~36px) plus
+        // decode feather, so the composited outline is never clipped.
+        private const val CONTENT_PAD_PX = 48f
 
         /** Default translucency of the tinted mesh layer (settings slider). */
         private const val DEFAULT_MASK_ALPHA = 110
@@ -89,9 +93,9 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Mesh tint opacity, 0..255 (settings "Mesh Opacity"). Applied once on
-     * the fast route and once at the composite blit - same pixel value
-     * either way. Changing it redraws immediately (paused gallery too).
+     * Mesh tint opacity, 0..255 (settings "Mesh Opacity"). Applied exactly
+     * once, as the composite blit alpha - never per-mask, never compounded.
+     * Changing it redraws immediately (paused gallery too).
      */
     var maskAlpha: Int = DEFAULT_MASK_ALPHA
         set(value) {
@@ -101,8 +105,8 @@ class OverlayView @JvmOverloads constructor(
 
     /**
      * Outline band opacity, 0..255 (settings "Outline Opacity"). The band's
-     * peak alpha already carries a gradient ramp (decode side), so at 255
-     * it reads as a bright, soft, fully-saturated border.
+     * band is a flat-top sharp line with only a ~1.5-texel feather (decode
+     * side), so at 255 it reads as a crisp, fully-saturated border.
      */
     var outlineAlpha: Int = DEFAULT_OUTLINE_ALPHA
         set(value) {
@@ -244,49 +248,63 @@ class OverlayView @JvmOverloads constructor(
             ))
         }
 
-        // ── MESH LAYER ──────────────────────────────────────────────────────
-        // Alpha compounding only happens where two masks OVERLAP; a
-        // non-overlapping set drawn directly at maskAlpha is pixel-
-        // equivalent to the composite result, so the offscreen buffer (full
-        // screen clear + blit) is only paid for when it is needed.
-        if (contentRects.isEmpty() || !haveOverlap(contentRects)) {
-            // Fast route - direct translucent draws, zero offscreen work.
-            for (i in items.indices) {
-                val mask = items[i].maskBitmap ?: continue
-                drawTint(canvas, mask, maskRectsPerItem[i],
-                    DetectionStyle.colorFor(items[i].classId), fullAlpha = false)
-            }
-        } else {
-            // Composite route - union blit at maskAlpha: overlap regions can
-            // never compound toward opacity (the ten-hands solid-mesh bug).
+        // ── MESH + OUTLINE: ONE idempotent blit per layer ───────────────────
+        // Both layers are drawn at FULL alpha into the offscreen buffer and
+        // blitted ONCE at their settings value. This is what makes the
+        // sliders EXACT for any number of objects (device report: 10% mesh
+        // read as ~60% with six hands, outline width "combined" at
+        // overlaps):
+        //  - mesh: overlapping masks are same-colour -> SRC_OVER idempotent
+        //    (never compounds toward opacity), then a single blit at
+        //    maskAlpha, so 10% is 10% whether one mask or six;
+        //  - outline: drawn per-detection DIRECTLY it stacked at crossings
+        //    (ramp tails summed -> wider/brighter line around groups); in
+        //    the buffer the peaks saturate at 255 and the single blit at
+        //    outlineAlpha applies the setting exactly once.
+        // The rect-based overlap test that used to pick a "fast route" for
+        // the mesh is gone: full-frame mask rasters can bleed outside their
+        // bbox, so non-overlap could never be proven cheaply - correctness
+        // first, cost is bounded by the dirty union (bbox + pad).
+        if (contentRects.isNotEmpty()) {
             val dirty = unionRect(contentRects)
             if (dirty.intersect(0f, 0f, width.toFloat(), height.toFloat())) {
-                val bc = meshBuffer(dirty)
-                bc.clipRect(dirty)
-                for (i in items.indices) {
-                    val mask = items[i].maskBitmap ?: continue
-                    drawTint(bc, mask, maskRectsPerItem[i],
-                        DetectionStyle.colorFor(items[i].classId), fullAlpha = true)
+                if (maskAlpha > 0) {
+                    // Pass 1 - meshes at full alpha.
+                    val bc = meshBuffer(dirty)
+                    bc.clipRect(dirty)
+                    for (i in items.indices) {
+                        val mask = items[i].maskBitmap ?: continue
+                        drawTint(bc, mask, maskRectsPerItem[i],
+                            DetectionStyle.colorFor(items[i].classId))
+                    }
+                    meshBlitPaint.alpha = maskAlpha
+                    blitSrcRect.set(Math.round(dirty.left), Math.round(dirty.top),
+                        Math.round(dirty.right), Math.round(dirty.bottom))
+                    canvas.drawBitmap(meshBitmap!!, blitSrcRect, dirty, meshBlitPaint)
                 }
-                meshBlitPaint.alpha = maskAlpha
-                blitSrcRect.set(Math.round(dirty.left), Math.round(dirty.top),
-                    Math.round(dirty.right), Math.round(dirty.bottom))
-                canvas.drawBitmap(meshBitmap!!, blitSrcRect, dirty, meshBlitPaint)
-            }
-        }
-
-        // ── OUTLINE LAYER (image-space band) ────────────────────────────────
-        // One band bitmap per detection, drawn directly (like the old stroke:
-        // crossings brighten slightly - the expected look for a bright border).
-        // The band already sits at the mesh's outer edge by construction, so
-        // no clip and no path building exist in this pipeline.
-        if (showSmoothOutline) {
-            for (i in items.indices) {
-                val ring = items[i].outlineBitmap ?: continue
-                outlinePaint.colorFilter = colorFilterFor(
-                    DetectionStyle.vibrantFor(DetectionStyle.colorFor(items[i].classId)))
-                outlinePaint.alpha = outlineAlpha
-                canvas.drawBitmap(ring, null, maskRectsPerItem[i], outlinePaint)
+                if (showSmoothOutline && outlineAlpha > 0) {
+                    // Pass 2 - outlines at full alpha (buffer re-cleared by
+                    // meshBuffer), blitted at outlineAlpha ON TOP of the
+                    // mesh that is now already on the canvas.
+                    val bc = meshBuffer(dirty)
+                    bc.clipRect(dirty)
+                    var anyRing = false
+                    for (i in items.indices) {
+                        val ring = items[i].outlineBitmap ?: continue
+                        outlinePaint.colorFilter = colorFilterFor(
+                            DetectionStyle.vibrantFor(
+                                DetectionStyle.colorFor(items[i].classId)))
+                        outlinePaint.alpha = 255
+                        bc.drawBitmap(ring, null, maskRectsPerItem[i], outlinePaint)
+                        anyRing = true
+                    }
+                    if (anyRing) {
+                        meshBlitPaint.alpha = outlineAlpha
+                        blitSrcRect.set(Math.round(dirty.left), Math.round(dirty.top),
+                            Math.round(dirty.right), Math.round(dirty.bottom))
+                        canvas.drawBitmap(meshBitmap!!, blitSrcRect, dirty, meshBlitPaint)
+                    }
+                }
             }
         }
 
@@ -349,14 +367,6 @@ class OverlayView @JvmOverloads constructor(
         )
     }
 
-    /** True when any two rects intersect (the alpha-compounding condition). */
-    private fun haveOverlap(rects: List<RectF>): Boolean {
-        for (i in rects.indices) for (j in i + 1 until rects.size) {
-            if (RectF.intersects(rects[i], rects[j])) return true
-        }
-        return false
-    }
-
     /** Bounding union of a non-empty rect list (new instance). */
     private fun unionRect(rects: List<RectF>): RectF {
         val u = RectF(rects[0])
@@ -365,18 +375,15 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Draws one mask tinted with the class colour.
-     *
-     * @param fullAlpha true = write at full alpha for the composite route,
-     *        which applies maskAlpha once at blit time; false = apply
-     *        maskAlpha directly (fast route).
+     * Draws one mask tinted with the class colour at FULL alpha - the
+     * caller blits the buffer once at [maskAlpha], so the setting applies
+     * exactly once no matter how many masks overlap in it.
      */
     private fun drawTint(
         canvas: Canvas, mask: Bitmap, maskRect: RectF, classColor: Int,
-        fullAlpha: Boolean,
     ) {
         maskPaint.colorFilter = colorFilterFor(classColor)
-        maskPaint.alpha = if (fullAlpha) 255 else maskAlpha
+        maskPaint.alpha = 255
         canvas.drawBitmap(mask, null, maskRect, maskPaint)
     }
 
