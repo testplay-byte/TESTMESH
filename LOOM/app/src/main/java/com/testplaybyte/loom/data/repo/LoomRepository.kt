@@ -340,7 +340,16 @@ class LoomRepository(
             // Removing a label clears it from every image that used it
             // (docs/05 §6).
             val states = p.states.mapValues { (_, st) ->
-                if (st.labelId == labelId) st.copy(labelId = null) else st
+                if (st.labelId == labelId || st.objects.any { it.labelId == labelId }) {
+                    st.copy(
+                        labelId = if (st.labelId == labelId) null else st.labelId,
+                        objects = st.objects.map { o ->
+                            if (o.labelId == labelId) o.copy(labelId = null) else o
+                        },
+                    )
+                } else {
+                    st
+                }
             }
             val next = touch(p.copy(labels = p.labels.filter { it.id != labelId }, states = states))
             writeProjectFolder(next, renderMissingImages = false)
@@ -394,11 +403,18 @@ class LoomRepository(
             ) {
                 st = st.copy(status = ImageStatus.DRAFT)
             }
-            if (p.states[imageId] == st) return@withLock
-            val next = touch(p.copy(states = p.states + (imageId to st)))
-            writeAnnotationsOnly(next)
-            writeLabelMe(next, imageId, embedImage)
-            replaceInMemory(next, touchOnly = true)
+            val changed = p.states[imageId] != st
+            if (!changed && !embedImage) return@withLock
+            if (changed) {
+                val next = touch(p.copy(states = p.states + (imageId to st)))
+                writeAnnotationsOnly(next)
+                writeLabelMe(next, imageId, embedImage)
+                replaceInMemory(next, touchOnly = true)
+            } else {
+                // state unchanged but an explicit save was requested — make
+                // sure the embedded-imageData sidecar actually lands
+                writeLabelMe(p, imageId, true)
+            }
         }
     }
 
@@ -410,7 +426,11 @@ class LoomRepository(
     private fun writeLabelMe(project: Project, imageId: String, embedImage: Boolean) {
         val im = project.images.firstOrNull { it.id == imageId } ?: return
         val st = project.states[imageId] ?: return
-        if (!st.hasContent) return // nothing worth a sidecar file yet
+        val sidecar = LabelMeCodec.fileNameFor(im.file)
+        // No content AND no existing sidecar → nothing to do. But when a
+        // sidecar EXISTS and the state was cleared, overwrite it with an
+        // empty document — otherwise rescan resurrects the stale shapes.
+        if (!st.hasContent && !workspace.fileExists(project.slug, sidecar)) return
         val bytes = if (embedImage) {
             try {
                 workspace.openInput(project.slug, im.file)?.use { it.readBytes() }
@@ -420,11 +440,7 @@ class LoomRepository(
         } else {
             null
         }
-        workspace.writeText(
-            project.slug,
-            LabelMeCodec.fileNameFor(im.file),
-            LabelMeCodec.encode(project, im, st, bytes),
-        )
+        workspace.writeText(project.slug, sidecar, LabelMeCodec.encode(project, im, st, bytes))
     }
 
     /** Per-image LabelMe JSONs for every annotated image (no imageData). */
@@ -740,10 +756,13 @@ class LoomRepository(
                 val text = workspace.readText(folder, LabelMeCodec.fileNameFor(im.file)) ?: continue
                 val shapes = LabelMeCodec.decode(text)
                 val base = states[im.id] ?: ImageState.empty(_settings.value.defaultDensity)
-                val objs = LabelMeCodec.toObjects(shapes, project.labels, im.width, im.height)
                 if (shapes.isNotEmpty()) {
+                    val (objs, working) = LabelMeCodec.toAnnotation(shapes, project.labels, im.width, im.height)
                     states[im.id] = base.copy(
                         objects = objs,
+                        // our marked "working" shape restores as the working
+                        // mesh, NOT a duplicate saved object
+                        mesh = working,
                         status = if (base.status == ImageStatus.UNLABELED) ImageStatus.DRAFT else base.status,
                     )
                 }

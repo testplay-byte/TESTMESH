@@ -244,7 +244,7 @@ object LoomRules {
     fun isDuplicate(existing: List<String>, candidate: String): Boolean =
         existing.any { it.equals(candidate, ignoreCase = true) }
 
-    /** Density clamp for the canvas (6–40). */
+    /** Density clamp for the canvas (3–200). */
     fun clampDensity(v: Int): Int = v.coerceIn(DENSITY_MIN, DENSITY_MAX)
 
     /** Density clamp for the settings default (8–36). */

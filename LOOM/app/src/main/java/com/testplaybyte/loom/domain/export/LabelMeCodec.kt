@@ -57,13 +57,16 @@ object LabelMeCodec {
         root.put("flags", JSONObject())
         val shapes = JSONArray()
         for (obj in state.objects + listOfNotNull(workingObj(state))) {
+            val isWorking = obj.id == "working"
             val labelName = project.labels.firstOrNull { it.id == obj.labelId }?.name ?: "unlabeled"
             shapes.put(
                 JSONObject().apply {
                     put("label", labelName)
                     put("points", pointsArray(DatasetWriters.realPoints(obj.mesh, image.width, image.height)))
                     put("group_id", JSONObject.NULL)
-                    put("description", "")
+                    // mark our in-progress shape so adoption restores it to
+                    // the working mesh instead of duplicating it as an object
+                    put("description", if (isWorking) "working" else "")
                     put("shape_type", "polygon")
                     put("flags", JSONObject())
                     put("mask", JSONObject.NULL)
@@ -92,8 +95,9 @@ object LabelMeCodec {
         return arr
     }
 
-    /** One decoded shape: label name + polygon in REAL image pixels. */
-    data class DecodedShape(val label: String?, val points: List<Pt>)
+    /** One decoded shape: label name + polygon in REAL image pixels.
+     *  [description] == "working" marks OUR working-mesh shape. */
+    data class DecodedShape(val label: String?, val points: List<Pt>, val description: String? = null)
 
     /**
      * Tolerant decode of a LabelMe document — returns its polygon shapes.
@@ -120,24 +124,47 @@ object LabelMeCodec {
                 pts.add(Pt(xy.optDouble(0, 0.0).toFloat(), xy.optDouble(1, 0.0).toFloat()))
             }
             if (pts.size >= 3) {
-                out.add(DecodedShape(sh.optString("label", "").ifEmpty { null }, pts))
+                out.add(
+                    DecodedShape(
+                        sh.optString("label", "").ifEmpty { null },
+                        pts,
+                        sh.optString("description", "").ifEmpty { null },
+                    ),
+                )
             }
         }
         return out
     }
 
     /**
-     * Converts decoded shapes into saved [ObjAnn]s in WORLD space (the
-     * inverse of [DatasetWriters.realPoints]' letterbox mapping).
+     * Converts decoded shapes into WORLD-space annotations (the inverse of
+     * [DatasetWriters.realPoints]' letterbox mapping): saved objects plus
+     * the marked "working" shape restored as the working mesh.
      */
-    fun toObjects(shapes: List<DecodedShape>, labels: List<Label>, width: Int, height: Int): List<ObjAnn> =
-        shapes.map { sh ->
-            ObjAnn(
-                id = Ids.uid("obj"),
-                labelId = labels.firstOrNull { it.name.equals(sh.label ?: "", ignoreCase = true) }?.id,
-                mesh = worldPoints(sh.points, width, height),
-            )
+    fun toAnnotation(
+        shapes: List<DecodedShape>,
+        labels: List<Label>,
+        width: Int,
+        height: Int,
+    ): Pair<List<ObjAnn>, List<Pt>?> {
+        val objs = ArrayList<ObjAnn>()
+        var working: List<Pt>? = null
+        for (sh in shapes) {
+            val world = worldPoints(sh.points, width, height)
+            if (sh.description == "working") {
+                working = world
+            } else {
+                objs.add(
+                    ObjAnn(
+                        id = Ids.uid("obj"),
+                        labelId = labels.firstOrNull { it.name.equals(sh.label ?: "", ignoreCase = true) }?.id,
+                        mesh = world,
+                    ),
+                )
+            }
         }
+        return objs to working
+    }
 
     /** Real image pixels → world (800×600 letterbox). */
     private fun worldPoints(pts: List<Pt>, width: Int, height: Int): List<Pt> {

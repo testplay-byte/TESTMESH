@@ -159,9 +159,13 @@ fun AnnotateScreen(
     LaunchedEffect(hintShownEver) {
         if (!hintShownEver) {
             delay(400)
-            hintVisible = true
-            delay(2000)
-            hintVisible = false
+            // only burn the once-ever flag when the canvas can actually
+            // show the card (no annotation content yet)
+            if (!state.present.hasContent) {
+                hintVisible = true
+                delay(2000)
+                hintVisible = false
+            }
             vm.repository.markHintShown()
         }
     }
@@ -310,6 +314,11 @@ fun AnnotateScreen(
                         val denseImg = withContext(Dispatchers.Default) {
                             MaskToPolygon.trace(mask, w, h, epsilon = 0.05f)
                         }
+                        // re-verify after the trace window: a Save object /
+                        // reopen click may have landed while we traced
+                        if (loadedImageId != image.id || sigOf(state.present) != sigAtRequest) {
+                            return@launch
+                        }
                         if (denseImg.isEmpty()) {
                             state.sculpting = false
                             vm.toast("No object found — put a + dot on it", ToastIcon.WARN)
@@ -405,12 +414,14 @@ fun AnnotateScreen(
             }
             LoomIconButton(IconUndo, "Undo", {
                 state.densityDraft = null
+                state.denseRing = null
                 state.sculpting = false
                 state.undo()
                 suppressAuto = sigOf(state.present) != lastSig[0]
             }, enabled = state.canUndo)
             LoomIconButton(IconRedo, "Redo", {
                 state.densityDraft = null
+                state.denseRing = null
                 state.sculpting = false
                 state.redo()
                 suppressAuto = sigOf(state.present) != lastSig[0]
@@ -681,7 +692,7 @@ fun AnnotateScreen(
         GuideRow(IconDotPlus, "Prompt dots & Magic Touch", "+ dots mark what to include, − dots what to avoid. On photos the Magic Touch model turns them into a precise mask; the mesh then hugs the object.")
         GuideRow(IconMesh, "Auto mesh & density", "The mesh grows itself from your dots — add or remove + dots and it re-sculpts. Density sets its vertex count; remeshing keeps your dots.")
         GuideRow(IconSettings, "Object label", "Once a mesh exists the object bar rises in with the object it belongs to — tap the object chip or the gear to edit the mesh: pick its class, tune density, check the vertex count, remove it.")
-        GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe follows your finger. Tap an edge midpoint to add one; long-press or Delete removes the selected vertex, Tap an edge midpoint to add one; long-press or Delete removes the selected vertex.")
+        GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe parks in the corner. Tap an edge midpoint to add one; select a vertex and use Delete to remove it.")
         GuideRow(IconBrush, "Brush & eraser", "Paint an exclusion to keep the mesh out of an area. Tap a painted stroke with the eraser to remove it.")
         GuideRow(IconTag, "Image tags", "Flag the image itself — Blurry, Occluded, Low light or your own. Tags sit in the top bar, ride with the annotations and export with the dataset.")
         GuideRow(IconPan, "Gestures", "Pan with one finger, pinch or scroll to zoom 50–500%, double-tap for 2×. Undo and redo live in the top bar.")
@@ -700,6 +711,7 @@ fun AnnotateScreen(
                 onClick = {
                     clearOpen = false
                     state.sculpting = false
+                    state.denseRing = null
                     state.commit { prev ->
                         prev.copy(dots = emptyList(), mesh = null, strokes = emptyList(), status = ImageStatus.UNLABELED)
                     }

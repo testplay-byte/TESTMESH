@@ -81,8 +81,9 @@ fun SplashScreen(
             return@LaunchedEffect
         }
         val start = System.currentTimeMillis()
-        markScale.animateTo(1f, tween(1150, easing = LoomMotion.easeSpring))
-        // Advance shortly after the mark settles — no dead wait.
+        launch { markScale.animateTo(1f, tween(1150, easing = LoomMotion.easeSpring)) }
+        // Advance shortly after the mark settles — no dead wait. The scale
+        // settle runs CONCURRENTLY with the draw-on (no blank lead-in).
         progress.animateTo(1f, tween(1700, easing = androidx.compose.animation.core.LinearEasing))
         while (!currentHydrated && System.currentTimeMillis() - start < 3000) delay(20)
         delay(250)

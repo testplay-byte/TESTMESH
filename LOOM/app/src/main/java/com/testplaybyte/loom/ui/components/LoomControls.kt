@@ -27,6 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.remember
@@ -410,13 +411,16 @@ private fun StepperHoldButton(
     val c = loomColors
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    // the hold loop must read the LATEST onStep (value changes recompose
+    // the caller's lambda while the effect keeps running)
+    val step by rememberUpdatedState(onStep)
     LaunchedEffect(pressed, enabled) {
         if (!pressed || !enabled) return@LaunchedEffect
-        onStep()
+        step()
         var interval = 250f
         delay(380)
         while (true) {
-            onStep()
+            step()
             delay(interval.toLong())
             interval = (interval * 0.88f).coerceAtLeast(60f)
         }
