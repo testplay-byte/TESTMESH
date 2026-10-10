@@ -36,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -431,25 +432,33 @@ private fun DrawScope.drawDot(d: Dot, dotSize: Float, selected: Boolean, c: com.
 }
 
 @Composable
-private fun Column3Hint(modifier: Modifier = Modifier) {
+private fun Column3Hint(modifier: Modifier = Modifier, onTap: () -> Unit) {
     val c = loomColors
     Box(
         modifier = modifier
+            .widthIn(max = 220.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(c.surface1.copy(alpha = 0.86f))
+            .background(c.surface1.copy(alpha = 0.9f))
             .border(1.dp, c.hairline, RoundedCornerShape(14.dp))
-            .padding(horizontal = 20.dp, vertical = 18.dp),
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onTap,
+            )
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        contentAlignment = Alignment.Center,
     ) {
         androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .border(1.5.dp, c.hairlineStrong, CircleShape),
+            Icon(
+                IconSparkles,
+                contentDescription = null,
+                tint = c.primary,
+                modifier = Modifier.size(26.dp),
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "Tap + dots on the object — the mesh sculpts itself.\n− dots push it away.",
+                text = "Tap + dots on the object — Magic Touch masks it.
+− dots remove areas.",
                 style = loomType.small.copy(fontSize = 12.5.sp),
                 color = c.text,
             )
@@ -523,7 +532,10 @@ private fun LoupeOverlay(
             // markers in screen px (de-emphasized)
             liveMesh?.let { m ->
                 val toL = { p: Pt -> Offset((p.x - vx) * LOUPE_MAG, (p.y - vy) * LOUPE_MAG) }
-                if (m.size >= 3) drawPath(polygonPath(m.map(toL)), color = c.mesh, style = Stroke(width = 1f))
+                if (m.size >= 3) {
+                    val lp = polygonPath(m.map { p -> toL(p).let { Pt(it.x, it.y) } })
+                    drawPath(lp, color = c.mesh, style = Stroke(width = 1f))
+                }
                 for (p in m) {
                     val o = toL(p)
                     drawCircle(color = Color(0xFFFFFDF6), radius = hdlR, center = o)
@@ -916,7 +928,6 @@ private class Gestures(
                 val w = toWorld(pos)
                 if (!moved && hypot(w.x - pressWorld.x, w.y - pressWorld.y) * state.cam.scale > SLOP_PX) {
                     moved = true
-                    lpJob?.cancel()
                 }
                 pressWorld = w
                 state.live = Live.VertexLive(vertexIndex, w)

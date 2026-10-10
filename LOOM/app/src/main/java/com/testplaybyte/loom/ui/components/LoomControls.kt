@@ -434,7 +434,6 @@ private fun StepperHoldButton(
         Icon(icon, contentDescription = description, tint = c.text, modifier = Modifier.size(15.dp))
     }
 }
-}
 
 // ── Chips ─────────────────────────────────────────────────────────────────
 
