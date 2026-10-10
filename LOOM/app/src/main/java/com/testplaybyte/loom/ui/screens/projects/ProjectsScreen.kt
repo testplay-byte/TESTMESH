@@ -279,14 +279,14 @@ private fun ThumbStack(
             val step = 50.dp
             Box(
                 modifier = Modifier
-                    .width(64.dp + (thumbs.size - 1) * step)
+                    .width(64.dp + step * (thumbs.size - 1))
                     .height(48.dp),
             ) {
                 thumbs.forEachIndexed { i, im ->
                     val status = project.stateOf(im.id).status
                     Box(
                         modifier = Modifier
-                            .offset(x = i * step)
+                            .offset(x = step * i)
                             .size(width = 64.dp, height = 48.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(c.surface2)

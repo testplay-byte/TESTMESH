@@ -178,6 +178,25 @@ fun AnnotateScreen(
         }
     }
 
+    // ── auto-suggest engine ──────────────────────────────────────────────
+    //
+    // Two mutually exclusive paths per image kind:
+    //  · SCENE images (seeded demo art): deterministic anchor sculpt —
+    //    the exact prototype mesh.ts semantics.
+    //  · REAL PHOTOS: Magic Touch — the prompt dots (+/−) and brush
+    //    strokes drive the MediaPipe InteractiveSegmenter; the traced
+    //    mask contour becomes the mesh. Every dot add/MOVE/remove and
+    //    every brush stroke re-runs it (600ms debounce, deferred while a
+    //    gesture is live).
+    val segmenter = remember { SmartSegmenter(context) }
+    DisposableEffect(Unit) { onDispose { segmenter.close() } }
+    var segRequest by remember { mutableIntStateOf(0) }
+    val segImageId = remember { arrayOf<String?>(null) }   // image the request belongs to
+    val lastSig = remember { arrayOf<String?>(null) }      // last prompt signature seen
+    var suppressAuto by remember { mutableStateOf(false) }
+
+    val promptSig = remember(state.present.dots, state.present.strokes) { sigOf(state.present) }
+
     // ── image load / switch: persist the previous, reset history ─────────
     var loadedImageId by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(image.id) {
@@ -197,25 +216,6 @@ fun AnnotateScreen(
         delay(LoomMotion.AUTOSAVE_THROTTLE_MS)
         vm.repository.saveImageState(project.id, image.id, state.present)
     }
-
-    // ── auto-suggest engine ──────────────────────────────────────────────
-    //
-    // Two mutually exclusive paths per image kind:
-    //  · SCENE images (seeded demo art): deterministic anchor sculpt —
-    //    the exact prototype mesh.ts semantics.
-    //  · REAL PHOTOS: Magic Touch — the prompt dots (+/−) and brush
-    //    strokes drive the MediaPipe InteractiveSegmenter; the traced
-    //    mask contour becomes the mesh. Every dot add/MOVE/remove and
-    //    every brush stroke re-runs it (600ms debounce, deferred while a
-    //    gesture is live).
-    val segmenter = remember { SmartSegmenter(context) }
-    DisposableEffect(Unit) { onDispose { segmenter.close() } }
-    var segRequest by remember { mutableIntStateOf(0) }
-    val segImageId = remember { arrayOf<String?>(null) }   // image the request belongs to
-    val lastSig = remember { arrayOf<String?>(null) }      // last prompt signature seen
-    var suppressAuto by remember { mutableStateOf(false) }
-
-    val promptSig = remember(state.present.dots, state.present.strokes) { sigOf(state.present) }
 
     LaunchedEffect(promptSig, image.id, photo) {
         if (promptSig == lastSig[0]) return@LaunchedEffect
