@@ -232,7 +232,9 @@ fun ExportScreen(
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         LoomButton(
-                            onClick = { shareExport(context, r.outDir) },
+                            onClick = {
+                                scope.launch { shareExport(context, vm, project.id, project.format) }
+                            },
                             size = LoomButtonSize.SM,
                             variant = LoomButtonVariant.TONAL,
                             icon = IconShare,
@@ -300,13 +302,28 @@ private fun SummaryRow(label: String, value: String) {
  * cache and hand it to ACTION_SEND through a FileProvider (docs/06 §8).
  * Falls back to a warning toast when the copy fails.
  */
-private fun shareExport(context: android.content.Context, outDir: String) {
+private suspend fun shareExport(
+    context: android.content.Context,
+    vm: LoomViewModel,
+    projectId: String,
+    format: com.testplaybyte.loom.domain.model.ExportFormat,
+) {
     try {
-        val source = File(outDir, "annotations.json")
-        val shareFile = if (source.isFile) source else File(outDir, "instances.json")
+        // Read through the workspace (SAF trees are not plain Files) and
+        // stage a copy in the cache for the FileProvider.
+        val name = if (format == com.testplaybyte.loom.domain.model.ExportFormat.COCO) {
+            "instances.json"
+        } else {
+            "annotations.json"
+        }
+        val bytes = vm.repository.readExportFile(projectId, name)
+        if (bytes == null) {
+            vm.toast("Nothing to share yet", com.testplaybyte.loom.domain.model.ToastIcon.WARN)
+            return
+        }
         val cacheDir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val target = File(cacheDir, shareFile.name)
-        if (shareFile.isFile) shareFile.copyTo(target, overwrite = true)
+        val target = File(cacheDir, name)
+        target.writeBytes(bytes)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target)
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/json"

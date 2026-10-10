@@ -450,6 +450,20 @@ class LoomRepository(
         }
     }
 
+    /**
+     * Reads an export artifact (e.g. `annotations.json`) through the
+     * workspace — used by the Share action, which must work for SAF trees
+     * where the display path is not a directly readable [File].
+     */
+    suspend fun readExportFile(projectId: String, name: String): ByteArray? = withContext(io) {
+        val p = projectById(projectId) ?: return@withContext null
+        try {
+            workspace.openInput(p.slug, name)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /** Total size of Loom-written data (settings readout, docs/03 §8). */
     suspend fun storageBytes(): Long = withContext(io) {
         var total = 0L
