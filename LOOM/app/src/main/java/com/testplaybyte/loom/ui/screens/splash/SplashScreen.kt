@@ -171,7 +171,7 @@ fun SplashScreen(
         }
 
         Text(
-            text = "v0.4.0 · prototype",
+            text = "v0.5.0 · prototype",
             style = loomType.monoSmall.copy(fontSize = 11.sp),
             color = c.textMuted,
             modifier = Modifier
