@@ -55,6 +55,12 @@ android {
         compose = true
     }
 
+    androidResources {
+        // Keep the Magic Touch model uncompressed so MediaPipe can mmap it
+        // (compressed assets pay a full decompression on every model load).
+        noCompress += "task"
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

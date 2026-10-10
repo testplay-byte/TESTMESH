@@ -283,7 +283,6 @@ private fun ThumbStack(
                     .height(48.dp),
             ) {
                 thumbs.forEachIndexed { i, im ->
-                    val status = project.stateOf(im.id).status
                     Box(
                         modifier = Modifier
                             .offset(x = step * i)
@@ -293,15 +292,21 @@ private fun ThumbStack(
                             .border(1.dp, c.hairlineStrong, RoundedCornerShape(8.dp)),
                     ) {
                         art(im, Modifier.fillMaxWidth().height(48.dp))
-                        if (status != ImageStatus.UNLABELED) {
-                            com.testplaybyte.loom.ui.components.StatusDot(
-                                status = status,
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(top = 4.dp, end = 4.dp),
-                                punchOutColor = c.surface1,
-                            )
-                        }
+                    }
+                }
+                // Status dots drawn AFTER the thumbs, on top: a dot tucked
+                // into a thumb's top-right corner would be covered by the
+                // next overlapping thumbnail.
+                thumbs.forEachIndexed { i, im ->
+                    val status = project.stateOf(im.id).status
+                    if (status != ImageStatus.UNLABELED) {
+                        com.testplaybyte.loom.ui.components.StatusDot(
+                            status = status,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .offset(x = step * i + 64.dp - 12.dp, y = 4.dp),
+                            punchOutColor = c.surface1,
+                        )
                     }
                 }
             }

@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -209,7 +208,7 @@ fun LoomSheet(
             Column(
                 modifier = modifier
                     .fillMaxWidth()
-                    .navigationBarsPadding()
+                    // nav-bar inset is applied once at the app shell
                     .clip(RoundedCornerShape(topStart = LoomShape.RADIUS_SURFACE_DP.dp, topEnd = LoomShape.RADIUS_SURFACE_DP.dp))
                     .background(c.surface1)
                     .border(
@@ -443,7 +442,7 @@ fun LoomBottomNav(
             .fillMaxWidth()
             .background(c.surface1)
             .border(1.dp, c.hairline)
-            .navigationBarsPadding()
+            // nav-bar inset is applied once at the app shell
             .height(64.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

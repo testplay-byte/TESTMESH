@@ -23,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -67,25 +68,32 @@ fun SplashScreen(
     val reducedMotion = remember {
         Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
     }
+    // LaunchedEffect(Unit) never restarts — poll the LIVE hydration flag,
+    // not the composition-time snapshot (else every cold start waits the
+    // full 3s bound instead of advancing when hydration actually lands).
+    val currentHydrated by rememberUpdatedState(hydrated)
+    // Shared across the effect AND the tap-to-skip so onDone can never fire
+    // twice (a second navigate would push a duplicate destination).
+    val advanced = remember { arrayOf(false) }
 
     // draw-on progress 0..1 over 900ms
     var drawOn by remember { mutableFloatStateOf(if (reducedMotion) 1f else 0f) }
     var barSweep by remember { mutableFloatStateOf(if (reducedMotion) 1f else 0f) }
 
+    fun advance() {
+        if (!advanced[0]) {
+            advanced[0] = true
+            onDone()
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (reducedMotion) {
             delay(50)
-            onDone()
+            advance()
             return@LaunchedEffect
         }
-        var advanced = false
         val start = System.currentTimeMillis()
-        fun advance() {
-            if (!advanced) {
-                advanced = true
-                onDone()
-            }
-        }
         launch {
             val anim = Animatable(0f)
             anim.animateTo(1f, tween(900, easing = LoomMotion.ease)) {
@@ -99,11 +107,11 @@ fun SplashScreen(
             anim.animateTo(1f, tween(1250, easing = LinearEasing)) {
                 barSweep = value
             }
-            while (!hydrated && System.currentTimeMillis() - start < 3000) delay(20)
+            while (!currentHydrated && System.currentTimeMillis() - start < 3000) delay(20)
             advance()
         }
         // Safety net: never hold the splash longer than 3.2s under any path.
-        while (!advanced && System.currentTimeMillis() - start < 3200) delay(30)
+        while (!advanced[0] && System.currentTimeMillis() - start < 3200) delay(30)
         advance()
     }
 
@@ -113,7 +121,7 @@ fun SplashScreen(
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-            ) { onDone() },
+            ) { advance() },
     ) {
         // drafting-grid backdrop (24dp cells)
         Canvas(modifier = Modifier.fillMaxSize()) {

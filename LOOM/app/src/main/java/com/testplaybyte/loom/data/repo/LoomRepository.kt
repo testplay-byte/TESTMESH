@@ -250,14 +250,16 @@ class LoomRepository(
     suspend fun deleteProject(projectId: String) = withContext(io) {
         mutex.withLock {
             val p = projectById(projectId) ?: return@withLock
+            // Dismiss unconditionally and BEFORE removeProjectData: a
+            // pure-demo folder is deleted right here, so a folderExists
+            // check afterwards is always false — and without the dismissal
+            // the demo project would resurrect on the next empty-workspace
+            // seed. For folder-backed projects this also stops re-adoption
+            // (spec copy: "Images on disk are not touched" — the folder with
+            // the user's images stays, but Loom no longer manages it).
+            dismissed = dismissed + p.slug
+            prefs.addDismissed(p.slug)
             removeProjectData(p, deleteIfPureDemo = true)
-            if (workspace.folderExists(p.slug)) {
-                // User images (imported / manually added) stay on disk; the
-                // folder is dismissed so it is not re-adopted (spec copy:
-                // "Images on disk are not touched").
-                dismissed = dismissed + p.slug
-                prefs.addDismissed(p.slug)
-            }
             _projects.value = _projects.value.filter { it.id != projectId }
             ImageStore.evict(p.slug)
         }
@@ -806,9 +808,6 @@ class LoomRepository(
             format = ExportFormat.LOOM_JSON,
             states = states,
         )
-        if (project.slug in dismissed) {
-            dismissed = dismissed - project.slug
-        }
         writeProjectFolder(project, renderMissingImages = true)
         _projects.value = listOf(project)
     }

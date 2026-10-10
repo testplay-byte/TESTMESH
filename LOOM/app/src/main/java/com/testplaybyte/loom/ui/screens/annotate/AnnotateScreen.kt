@@ -191,8 +191,8 @@ fun AnnotateScreen(
     val segmenter = remember { SmartSegmenter(context) }
     DisposableEffect(Unit) { onDispose { segmenter.close() } }
     var segRequest by remember { mutableIntStateOf(0) }
-    val segImageId = remember { arrayOf<String?>(null) }   // image the request belongs to
-    val lastSig = remember { arrayOf<String?>(null) }      // last prompt signature seen
+    val lastSig = remember { arrayOf<String?>(null) }      // last prompt signature processed
+    val segSig = remember { arrayOf<String?>(null) }       // signature the in-flight request was built from
     var suppressAuto by remember { mutableStateOf(false) }
 
     val promptSig = remember(state.present.dots, state.present.strokes) { sigOf(state.present) }
@@ -205,7 +205,6 @@ fun AnnotateScreen(
         }
         state.reset(project.stateOf(image.id))
         loadedImageId = image.id
-        segImageId[0] = image.id
         lastSig[0] = sigOf(state.present)
     }
 
@@ -219,9 +218,12 @@ fun AnnotateScreen(
 
     LaunchedEffect(promptSig, image.id, photo) {
         if (promptSig == lastSig[0]) return@LaunchedEffect
-        lastSig[0] = promptSig
         if (suppressAuto) {
+            // History op (undo/redo/clear) already restored the right state —
+            // just sync the signature so the next real edit re-sculpts.
             suppressAuto = false
+            state.sculpting = false
+            lastSig[0] = promptSig
             return@LaunchedEffect
         }
         state.sculpting = true
@@ -230,6 +232,7 @@ fun AnnotateScreen(
 
         if (image.sceneId != null) {
             // ── deterministic sculpt (prototype path, scene anchors) ────
+            lastSig[0] = promptSig
             val hasPos = state.present.dots.any { it.isPos }
             if (!hasPos && state.present.mesh == null) {
                 state.sculpting = false
@@ -254,38 +257,53 @@ fun AnnotateScreen(
         } else {
             // ── Magic Touch (real photos) ────────────────────────────────
             val bmp = photo
-            val hasPrompts = state.present.dots.isNotEmpty() || state.present.strokes.isNotEmpty()
-            if (bmp == null || !hasPrompts) {
+            if (bmp == null) {
+                // Photo still decoding — leave lastSig unconsumed so the
+                // decoded-photo re-run performs the segmentation.
                 state.sculpting = false
-                if (bmp == null) lastSig[0] = null // photo still decoding — re-arm
+                return@LaunchedEffect
+            }
+            lastSig[0] = promptSig
+            val hasPrompts = state.present.dots.isNotEmpty() || state.present.strokes.isNotEmpty()
+            if (!hasPrompts) {
+                state.sculpting = false
                 return@LaunchedEffect
             }
             val layout = PhotoLayout.of(bmp.width, bmp.height)
-            segImageId[0] = image.id
+            val sigAtRequest = promptSig
+            segSig[0] = sigAtRequest
             val specs = buildSegSpecs(state.present, layout)
             segRequest = segmenter.segment(
                 bmp.asAndroidBitmap(),
                 specs,
                 { requestId, mask, w, h ->
-                    if (requestId != segRequest || loadedImageId != segImageId[0]) return@segment
-                    val poly = MaskToPolygon.trace(mask, w, h)
-                    if (poly.isEmpty()) {
+                    // Stale guards: superseded request, switched image, or
+                    // prompts changed meanwhile (undo/clear/new edit) — drop.
+                    if (requestId != segRequest) return@segment
+                    if (loadedImageId != image.id) return@segment
+                    if (segSig[0] != sigAtRequest || sigOf(state.present) != sigAtRequest) return@segment
+                    scope.launch {
+                        // Mask tracing is heavy — keep it off the main thread.
+                        val poly = withContext(Dispatchers.Default) { MaskToPolygon.trace(mask, w, h) }
+                        if (poly.isEmpty()) {
+                            state.sculpting = false
+                            vm.toast("No object found — put a + dot on it", ToastIcon.WARN)
+                            return@launch
+                        }
+                        val world = poly.map { layout.imageToWorld(it.x, it.y) }
+                        val ring = MeshMath.resampleRing(
+                            world,
+                            LoomRules.clampDensity(state.densityDraft ?: state.present.density),
+                        )
+                        state.commit { prev -> prev.copy(mesh = ring) }
+                        state.meshGen++
                         state.sculpting = false
-                        vm.toast("No object found — put a + dot on it", ToastIcon.WARN)
-                        return@segment
+                        pulseNow()
                     }
-                    val world = poly.map { layout.imageToWorld(it.x, it.y) }
-                    val ring = MeshMath.resampleRing(
-                        world,
-                        LoomRules.clampDensity(state.densityDraft ?: state.present.density),
-                    )
-                    state.commit { prev -> prev.copy(mesh = ring) }
-                    state.meshGen++
-                    state.sculpting = false
-                    pulseNow()
                 },
                 { requestId, message ->
-                    if (requestId != segRequest || loadedImageId != segImageId[0]) return@segment
+                    if (requestId != segRequest || loadedImageId != image.id) return@segment
+                    if (segSig[0] != sigAtRequest || sigOf(state.present) != sigAtRequest) return@segment
                     state.sculpting = false
                     vm.toast("Smart mask failed: $message", ToastIcon.WARN)
                 },
@@ -355,15 +373,15 @@ fun AnnotateScreen(
             }
             LoomIconButton(IconUndo, "Undo", {
                 state.densityDraft = null
-                suppressAuto = true
                 state.sculpting = false
                 state.undo()
+                suppressAuto = sigOf(state.present) != lastSig[0]
             }, enabled = state.canUndo)
             LoomIconButton(IconRedo, "Redo", {
                 state.densityDraft = null
-                suppressAuto = true
                 state.sculpting = false
                 state.redo()
+                suppressAuto = sigOf(state.present) != lastSig[0]
             }, enabled = state.canRedo)
             LoomIconButton(IconHelp, "Canvas guide", { helpOpen = true })
         }
@@ -604,11 +622,11 @@ fun AnnotateScreen(
             LoomButton(
                 onClick = {
                     clearOpen = false
-                    suppressAuto = true
                     state.sculpting = false
                     state.commit { prev ->
                         prev.copy(dots = emptyList(), mesh = null, strokes = emptyList(), status = ImageStatus.UNLABELED)
                     }
+                    suppressAuto = sigOf(state.present) != lastSig[0]
                     pulseNow()
                     vm.toast("Annotations cleared", ToastIcon.CHECK)
                 },
@@ -747,7 +765,7 @@ fun AnnotateScreen(
         LoomButton(
             onClick = {
                 objOpen = false
-                suppressAuto = true
+                suppressAuto = sigOf(state.present) != lastSig[0]
                 state.sculpting = false
                 state.commit { prev -> prev.copy(mesh = null) }
                 state.selection = null
@@ -907,14 +925,20 @@ private fun EmptyAnnotate(onExit: () -> Unit) {
  * drawPhoto, exposed so prompt points can move between world and image
  * pixel coordinates (the segmenter works in image pixels).
  */
-private data class PhotoLayout(val s: Float, val dx: Float, val dy: Float) {
+private data class PhotoLayout(val s: Float, val dx: Float, val dy: Float, val pw: Int, val ph: Int) {
     fun imageToWorld(ix: Float, iy: Float) = Pt(ix * s + dx, iy * s + dy)
-    fun worldToImage(wx: Float, wy: Float) = Pt((wx - dx) / s, (wy - dy) / s)
+
+    /** Image-pixel coords, clamped into the bitmap (prompt dots may sit in
+     *  the letterbox margin; the segmenter expects in-bounds points). */
+    fun worldToImage(wx: Float, wy: Float) = Pt(
+        ((wx - dx) / s).coerceIn(0f, pw - 1f),
+        ((wy - dy) / s).coerceIn(0f, ph - 1f),
+    )
 
     companion object {
         fun of(pw: Int, ph: Int): PhotoLayout {
             val s = min(800f / pw, 600f / ph)
-            return PhotoLayout(s, (800f - pw * s) / 2f, (600f - ph * s) / 2f)
+            return PhotoLayout(s, (800f - pw * s) / 2f, (600f - ph * s) / 2f, pw, ph)
         }
     }
 }

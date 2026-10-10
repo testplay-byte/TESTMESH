@@ -466,7 +466,8 @@ private fun LoupeOverlay(
     val cy = if (roomAbove) {
         sy - LOUPE_GAP - half
     } else {
-        clamp(sy + LOUPE_GAP + half, LOUPE_PX + 8f, max(LOUPE_PX + 8f, viewport.height - 8f))
+        // clamp the loupe's BOTTOM edge inside the viewport
+        clamp(sy + LOUPE_GAP + half, LOUPE_PX + 8f, max(LOUPE_PX + 8f, viewport.height - half - 8f))
     }
     val lvw = LOUPE_PX / LOUPE_MAG
     val vx = pos.x - lvw / 2f
