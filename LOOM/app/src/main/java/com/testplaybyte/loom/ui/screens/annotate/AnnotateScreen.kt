@@ -57,6 +57,7 @@ import com.testplaybyte.loom.data.scene.CompiledScene
 import com.testplaybyte.loom.data.scene.SceneLibrary
 import com.testplaybyte.loom.domain.mesh.MeshMath
 import com.testplaybyte.loom.domain.model.ImageState
+import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.ImageStatus
 import com.testplaybyte.loom.domain.model.LoomRules
 import com.testplaybyte.loom.domain.model.ToastIcon
