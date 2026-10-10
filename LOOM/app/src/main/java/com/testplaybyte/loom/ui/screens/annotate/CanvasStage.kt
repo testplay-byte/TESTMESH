@@ -134,7 +134,7 @@ fun CanvasStage(
     val scope = rememberCoroutineScope()
     var size by remember { mutableStateOf(IntSize.Zero) }
     val gestures = remember { Gestures(state, scope) }.apply {
-        densityPx = density
+        densityPx = density.density
         onWarn = onWarn
         onStrokeRemoved = onCanvasFeedback
         onDotPlaced = onCanvasFeedback

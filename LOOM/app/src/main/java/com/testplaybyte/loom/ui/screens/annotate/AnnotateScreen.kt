@@ -40,7 +40,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.animateInt
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloatAsState
@@ -543,7 +542,7 @@ fun AnnotateScreen(
                 onWarn = { msg -> vm.toast(msg, ToastIcon.WARN) },
                 onCanvasFeedback = {
                     if (settings.haptics) {
-                        haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
@@ -556,12 +555,13 @@ fun AnnotateScreen(
             val meshSize = state.mesh?.size ?: 0
             if (state.sculpting || state.mesh != null || state.objects.isNotEmpty()) {
                 val dotAnim = rememberInfiniteTransition(label = "pill")
-                val dots by dotAnim.animateInt(
-                    initialValue = 0,
-                    targetValue = 4,
+                val dotF by dotAnim.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 4f,
                     animationSpec = infiniteRepeatable(tween(900, easing = androidx.compose.animation.core.LinearEasing)),
                     label = "pillDots",
                 )
+                val dots = dotF.toInt().coerceIn(0, 3)
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
