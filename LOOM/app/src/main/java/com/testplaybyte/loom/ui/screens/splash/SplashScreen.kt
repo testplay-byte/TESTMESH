@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import com.testplaybyte.loom.ui.theme.LoomMotion
 import com.testplaybyte.loom.ui.theme.loomColors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * §1 Splash — the brand mark IS the splash (docs/03 §1, v0.6 redesign).
