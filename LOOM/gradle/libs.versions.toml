@@ -11,6 +11,9 @@ lifecycle = "2.8.7"
 datastore = "1.1.1"
 documentfile = "1.0.1"
 junit = "4.13.2"
+# MediaPipe tasks-vision — powers Magic Touch smart selection
+# (InteractiveSegmenter + the bundled interactive_segmentation.task model).
+tasksVision = "1.1.0"
 # org.json for JVM unit tests (bundled in the Android runtime otherwise).
 json = "20240303"
 
@@ -30,6 +33,7 @@ androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "l
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
 androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "tasksVision" }
 json = { group = "org.json", name = "json", version.ref = "json" }
 
 [plugins]

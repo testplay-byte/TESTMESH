@@ -7,6 +7,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -55,7 +57,12 @@ private fun LoomAppShell(vm: LoomViewModel) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(loomColors.bg),
+            .background(loomColors.bg)
+            // Edge-to-edge: the background still paints under the system
+            // bars, but every screen's content starts BELOW them — headers
+            // must never sit under the status bar.
+            .statusBarsPadding()
+            .navigationBarsPadding(),
     ) {
         LoomNavHost(navController = navController, vm = vm)
         // The toast overlays everything (z-top, docs/02 §6).

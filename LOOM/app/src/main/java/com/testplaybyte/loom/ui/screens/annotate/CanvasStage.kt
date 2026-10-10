@@ -35,7 +35,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -70,12 +69,10 @@ import com.testplaybyte.loom.domain.model.DotKind
 import com.testplaybyte.loom.domain.model.Ids
 import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.Stroke as LoomStroke
-import com.testplaybyte.loom.ui.icons.IconChevronDown
 import com.testplaybyte.loom.ui.icons.IconClose
 import com.testplaybyte.loom.ui.icons.IconTrash
 import com.testplaybyte.loom.ui.theme.loomColors
 import com.testplaybyte.loom.ui.theme.loomType
-import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -111,7 +108,6 @@ private const val LOUPE_MAG = 3.2f
 private const val LOUPE_GAP = 72f
 private const val LOUPE_HDL_PX = 2.5f
 private const val LOUPE_DOT_PX = 4.4f
-private const val NUDGE_STEP = 8f
 private const val GRID_CELL = 24f
 private const val MIN_VISIBLE = 72f     // world px that must stay on screen
 private const val FIT_PADDING = 28f
@@ -301,9 +297,6 @@ fun CanvasStage(
             viewport = size,
         )
 
-        // ── nudge arrows (edit + vertex selected) ────────────────────────
-        NudgeArrows(state = state, viewport = size)
-
         // ── delete chip (edit + selection) ───────────────────────────────
         DeleteChip(
             state = state,
@@ -464,8 +457,17 @@ private fun LoupeOverlay(
     val half = LOUPE_PX / 2f
     val sx = pos.x * cam.scale + cam.tx
     val sy = pos.y * cam.scale + cam.ty
-    val cx = clamp(sx, half, viewport.width - half)
-    val cy = clamp(sy - LOUPE_GAP - half, half, max(half, viewport.height - LOUPE_PX - 30f))
+    // Place the loupe ABOVE the finger by default; when there is no room
+    // (finger near the top edge) flip it BELOW so it never covers the
+    // system bars or leaves the viewport. Horizontally it hugs the finger,
+    // clamped to the canvas edges.
+    val roomAbove = sy - LOUPE_GAP - LOUPE_PX >= 0f
+    val cx = clamp(sx, half, max(half, viewport.width - half))
+    val cy = if (roomAbove) {
+        sy - LOUPE_GAP - half
+    } else {
+        clamp(sy + LOUPE_GAP + half, LOUPE_PX + 8f, max(LOUPE_PX + 8f, viewport.height - 8f))
+    }
     val lvw = LOUPE_PX / LOUPE_MAG
     val vx = pos.x - lvw / 2f
     val vy = pos.y - lvw / 2f
@@ -546,7 +548,7 @@ private fun LoupeOverlay(
             )
         }
     }
-    // coordinate readout under the loupe
+    // coordinate readout attached to the loupe's far edge (clamped on-screen)
     Text(
         text = "x ${Math.round(pos.x)} · y ${Math.round(pos.y)}",
         style = loomType.monoSmall.copy(fontWeight = FontWeight.W500),
@@ -558,65 +560,7 @@ private fun LoupeOverlay(
     )
 }
 
-// ── nudge arrows + delete chip ────────────────────────────────────────────
-
-@Composable
-private fun NudgeArrows(
-    state: AnnotateState,
-    viewport: IntSize,
-) {
-    val c = loomColors
-    val sel = state.selection as? Selection.Vertex ?: return
-    if (state.tool != Tool.EDIT) return
-    val mesh = state.liveMesh() ?: return
-    val p = mesh.getOrNull(sel.index) ?: return
-    val cam = state.cam
-    val sx = clamp(p.x * cam.scale + cam.tx, 18f, viewport.width - 18f)
-    val sy = clamp(p.y * cam.scale + cam.ty, 18f, viewport.height - 18f)
-    val off = 32f
-    val step = { v: Float -> if (v == 0f) 0f else (v / abs(v)) * NUDGE_STEP }
-
-    @Composable
-    fun arrow(dx: Float, dy: Float, rotation: Float, label: String) {
-        Box(
-            modifier = Modifier
-                .offset { IntOffset((sx + dx - 14f).toInt(), (sy + dy - 14f).toInt()) }
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(c.surface2)
-                .border(1.dp, c.hairlineStrong, CircleShape)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                ) {
-                    state.commit { prev ->
-                        prev.mesh?.let { m ->
-                            prev.copy(
-                                mesh = m.mapIndexed { i, v ->
-                                    if (i != sel.index) v else Pt(
-                                        clamp(v.x + step(dx), 0f, WORLD_W),
-                                        clamp(v.y + step(dy), 0f, WORLD_H),
-                                    )
-                                },
-                            )
-                        } ?: prev
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(modifier = Modifier.rotateDeg(rotation)) {
-                Icon(IconChevronDown, contentDescription = label, tint = c.text, modifier = Modifier.size(13.dp))
-            }
-        }
-    }
-
-    arrow(0f, -off, 180f, "Nudge vertex up")
-    arrow(off, 0f, -90f, "Nudge vertex right")
-    arrow(0f, off, 0f, "Nudge vertex down")
-    arrow(-off, 0f, 90f, "Nudge vertex left")
-}
-
-private fun Modifier.rotateDeg(deg: Float): Modifier = this.rotate(deg)
+// ── delete chip ───────────────────────────────────────────────────────────
 
 @Composable
 private fun DeleteChip(state: AnnotateState, onDelete: () -> Unit, modifier: Modifier = Modifier) {
@@ -791,6 +735,14 @@ private class Gestures(
         state.commit { prev -> prev.copy(dots = prev.dots + dot) }
     }
 
+    /** Starts a dot MOVE gesture for the dot nearest [w] (must be a hit). */
+    private fun beginDotMove(w: Pt) {
+        val dot = hitDot(w) ?: return
+        kind = Kind.DOT
+        dotId = dot.id
+        state.selection = Selection.DotSel(dot.id)
+    }
+
     fun insertAt(w: Pt) {
         state.commit { prev -> prev.mesh?.let { prev.copy(mesh = MeshMath.insertVertex(it, w)) } ?: prev }
     }
@@ -869,8 +821,19 @@ private class Gestures(
                 startTx = state.cam.tx
                 startTy = state.cam.ty
             }
-            Tool.DOT_POS -> addDot(DotKind.POS, w)
-            Tool.DOT_NEG -> addDot(DotKind.NEG, w)
+            Tool.DOT_POS ->
+                if (hitDot(w) != null) {
+                    // Press ON an existing dot = move it (tap adds, drag moves).
+                    beginDotMove(w)
+                } else {
+                    addDot(DotKind.POS, w)
+                }
+            Tool.DOT_NEG ->
+                if (hitDot(w) != null) {
+                    beginDotMove(w)
+                } else {
+                    addDot(DotKind.NEG, w)
+                }
             Tool.BRUSH -> {
                 kind = Kind.BRUSH
                 brushId = Ids.uid("str")

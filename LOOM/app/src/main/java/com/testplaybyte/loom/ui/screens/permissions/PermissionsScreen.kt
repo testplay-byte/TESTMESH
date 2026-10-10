@@ -48,24 +48,26 @@ import com.testplaybyte.loom.ui.components.LoomMark
 import com.testplaybyte.loom.ui.icons.IconCheck
 import com.testplaybyte.loom.ui.icons.IconFolderOpen
 import com.testplaybyte.loom.ui.icons.IconPhotos
-import com.testplaybyte.loom.ui.icons.IconShield
 import com.testplaybyte.loom.ui.theme.loomColors
 import com.testplaybyte.loom.ui.theme.loomType
 import kotlinx.coroutines.launch
 
 /**
  * §2 Permissions (first run) — real Android grants (docs/03 §2 +
- * docs/06 §8).
+ * docs/06 §8), trimmed to what the app actually needs:
  *
  *  · `Photos & videos` → the real READ_MEDIA_IMAGES / READ_EXTERNAL_STORAGE
- *    runtime permission;
- *  · `All files` → SAF document tree (never MANAGE_EXTERNAL_STORAGE): the
- *    card is satisfied by picking the workspace folder (sets files+folder);
+ *    runtime permission (reads images you annotate);
  *  · `Storage folder` → ACTION_OPEN_DOCUMENT_TREE, persisted, and the
- *    card's sub becomes the chosen path (mono).
+ *    card's sub becomes the chosen path (mono). This single grant covers
+ *    everything on-disk: project folders, JSON files, exports.
  *
- * Continue unlocks only when ALL THREE are granted; "Continue with limited
- * access" is always available and runs the app on app-private storage.
+ * There is deliberately NO "All files" (MANAGE_EXTERNAL_STORAGE) card —
+ * SAF tree access is the correct, scoped permission for this app.
+ *
+ * Continue is always live: with a grant it proceeds; with nothing granted
+ * it continues in limited-access mode (app-private storage). The gate rule
+ * (docs/04 §1) is any single grant OR skip unlocks the app.
  */
 @Composable
 fun PermissionsScreen(
@@ -97,7 +99,7 @@ fun PermissionsScreen(
         }
     }
 
-    // Real SAF folder picker (grants "All files" + "Storage folder").
+    // Real SAF folder picker (covers everything on disk: datasets + exports).
     val folderLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri: Uri? ->
@@ -158,14 +160,6 @@ fun PermissionsScreen(
         Spacer(Modifier.height(12.dp))
         GrantCard(
             icon = IconFolderOpen,
-            title = "All files",
-            sub = "Create dataset folders and write exports",
-            granted = perms.files,
-            onGrant = { folderLauncher.launch(null) },
-        )
-        Spacer(Modifier.height(12.dp))
-        GrantCard(
-            icon = IconShield,
             title = "Storage folder",
             sub = if (perms.folder && perms.folderName != null) {
                 workspacePath.ifEmpty { perms.folderName ?: "" }
@@ -178,26 +172,30 @@ fun PermissionsScreen(
         )
 
         Spacer(Modifier.height(26.dp))
+        // Always live: a grant proceeds normally; nothing granted proceeds
+        // in limited-access mode — never a washed-out disabled state.
         LoomButton(
-            onClick = onDone,
+            onClick = {
+                scope.launch {
+                    if (!perms.unlocked) vm.repository.skipPerms()
+                    onDone()
+                }
+            },
             fullWidth = true,
-            enabled = perms.allGranted,
-            label = "Continue",
+            label = if (perms.unlocked) "Continue" else "Continue with limited access",
         )
-        if (!perms.allGranted) {
-            Spacer(Modifier.height(8.dp))
-            LoomButton(
-                onClick = {
-                    scope.launch {
-                        vm.repository.skipPerms()
-                        onDone()
-                    }
-                },
-                fullWidth = true,
-                variant = LoomButtonVariant.GHOST,
-                label = "Continue with limited access",
-            )
-        }
+        Spacer(Modifier.height(8.dp))
+        LoomButton(
+            onClick = {
+                scope.launch {
+                    vm.repository.skipPerms()
+                    onDone()
+                }
+            },
+            fullWidth = true,
+            variant = LoomButtonVariant.GHOST,
+            label = "Skip for now",
+        )
         Spacer(Modifier.height(14.dp))
         Text(
             text = "Your grants persist; you can change them in system settings.",

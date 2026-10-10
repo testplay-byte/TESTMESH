@@ -140,11 +140,7 @@ class LoomRepository(
             workspace = buildWorkspace(prefs.currentWorkspaceUri())
             _workspacePath.value = workspace.displayPath
             _projects.value = scanProjects()
-
-            if (!prefs.seedDone.first() && _projects.value.isEmpty()) {
-                seedDemoProject()
-                prefs.setSeedDone()
-            }
+            maybeSeed()
             _hydrated.value = true
         }
     }
@@ -171,6 +167,9 @@ class LoomRepository(
         workspace = buildWorkspace(uri)
         _workspacePath.value = workspace.displayPath
         rescanLocked()
+        // The demo project may have been seeded into the app-private
+        // fallback before a folder existed — offer it in the real folder too.
+        maybeSeed()
     }
 
     suspend fun skipPerms() = withContext(io) {
@@ -744,6 +743,26 @@ class LoomRepository(
     }
 
     // ── seed (docs/01 §Demo content / docs/05 §4) ─────────────────────────
+
+    /**
+     * Seeds the demo project whenever the workspace scan came up empty and
+     * the user has not deliberately dismissed it. This runs on every
+     * initialize and after a storage-folder change: the first seed often
+     * lands in the app-private fallback (no folder granted yet), and the
+     * demo must appear once the real folder exists. Deleting the demo
+     * dismisses its slug, so it never resurrects against the user's will.
+     * Never throws — a failed seed (unwritable folder) just retries later.
+     */
+    private suspend fun maybeSeed() {
+        if (_projects.value.isNotEmpty()) return
+        if ("object-scan-demo" in dismissed) return
+        try {
+            seedDemoProject()
+            prefs.setSeedDone()
+        } catch (t: Throwable) {
+            // Seeding is best-effort; leave seedDone unset and retry later.
+        }
+    }
 
     /**
      * The first-run demo project: 6 scenes, 6 labels, street pre-marked

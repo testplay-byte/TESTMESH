@@ -272,25 +272,37 @@ private fun ThumbStack(
     val thumbs = project.images.take(4)
     val extra = project.images.size - thumbs.size
     Row(verticalAlignment = Alignment.CenterVertically) {
-        thumbs.forEachIndexed { i, im ->
-            val status = project.stateOf(im.id).status
+        if (thumbs.isNotEmpty()) {
+            // A fixed-width Box with stepped placement: every thumb after
+            // the first overlaps the previous by 14dp (a plain Row + offset
+            // would still reserve the full width and leave gaps).
+            val step = 50.dp
             Box(
                 modifier = Modifier
-                    .offset(x = if (i == 0) 0.dp else (-14).dp)
-                    .size(width = 64.dp, height = 48.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(c.surface2)
-                    .border(1.dp, c.hairlineStrong, RoundedCornerShape(8.dp)),
+                    .width(64.dp + (thumbs.size - 1) * step)
+                    .height(48.dp),
             ) {
-                art(im, Modifier.fillMaxWidth().height(48.dp))
-                if (status != ImageStatus.UNLABELED) {
-                    com.testplaybyte.loom.ui.components.StatusDot(
-                        status = status,
+                thumbs.forEachIndexed { i, im ->
+                    val status = project.stateOf(im.id).status
+                    Box(
                         modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(top = 4.dp, end = 4.dp),
-                        punchOutColor = c.surface1,
-                    )
+                            .offset(x = i * step)
+                            .size(width = 64.dp, height = 48.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(c.surface2)
+                            .border(1.dp, c.hairlineStrong, RoundedCornerShape(8.dp)),
+                    ) {
+                        art(im, Modifier.fillMaxWidth().height(48.dp))
+                        if (status != ImageStatus.UNLABELED) {
+                            com.testplaybyte.loom.ui.components.StatusDot(
+                                status = status,
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(top = 4.dp, end = 4.dp),
+                                punchOutColor = c.surface1,
+                            )
+                        }
+                    }
                 }
             }
         }

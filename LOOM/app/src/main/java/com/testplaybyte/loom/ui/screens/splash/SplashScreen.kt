@@ -52,7 +52,9 @@ import kotlinx.coroutines.launch
  * workbench` (mono 12, muted), then a 2dp × 120dp bar whose amber fill
  * sweeps 0→100%.
  *
- * Behavior: auto-advance at 2250ms total; tap anywhere skips; when the
+ * Behavior: advances the moment the bar completes (~1950ms) — no dead time
+ * after the fill; hydration of persisted state is awaited with a 3s bound
+ * so a slow read can never hang the splash; tap anywhere skips; when the
  * system animator scale is 0 (reduced motion) it advances after 50ms.
  */
 @Composable
@@ -76,6 +78,14 @@ fun SplashScreen(
             onDone()
             return@LaunchedEffect
         }
+        var advanced = false
+        val start = System.currentTimeMillis()
+        fun advance() {
+            if (!advanced) {
+                advanced = true
+                onDone()
+            }
+        }
         launch {
             val anim = Animatable(0f)
             anim.animateTo(1f, tween(900, easing = LoomMotion.ease)) {
@@ -85,14 +95,16 @@ fun SplashScreen(
         launch {
             delay(700)
             val anim = Animatable(0f)
+            // Advance the instant the bar finishes filling (docs: no linger).
             anim.animateTo(1f, tween(1250, easing = LinearEasing)) {
                 barSweep = value
             }
+            while (!hydrated && System.currentTimeMillis() - start < 3000) delay(20)
+            advance()
         }
-        delay(LoomMotion.SPLASH_TOTAL_MS)
-        // Wait for the persisted state before choosing permissions vs projects.
-        while (!hydrated) delay(30)
-        onDone()
+        // Safety net: never hold the splash longer than 3.2s under any path.
+        while (!advanced && System.currentTimeMillis() - start < 3200) delay(30)
+        advance()
     }
 
     Box(

@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -42,13 +41,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.testplaybyte.loom.data.scene.SceneLibrary
 import com.testplaybyte.loom.domain.model.LoomRules
 import com.testplaybyte.loom.domain.model.ToastIcon
 import com.testplaybyte.loom.ui.LoomViewModel
@@ -62,7 +59,6 @@ import com.testplaybyte.loom.ui.components.LoomInput
 import com.testplaybyte.loom.ui.components.LoomPathPill
 import com.testplaybyte.loom.ui.components.LoomScreenHeader
 import com.testplaybyte.loom.ui.components.LoomSheet
-import com.testplaybyte.loom.ui.components.SceneArt
 import com.testplaybyte.loom.ui.components.SectionLabel
 import com.testplaybyte.loom.ui.icons.IconCheck
 import com.testplaybyte.loom.ui.icons.IconChevronRight
@@ -72,14 +68,20 @@ import com.testplaybyte.loom.ui.theme.loomType
 import kotlinx.coroutines.launch
 
 /**
- * §4 New project — the 4-step creation form on one scrollable screen
- * (docs/03 §4): Name (32 chars + live slug preview) → Location (folder
- * picker sheet: workspace root, existing subfolders, create-new-folder,
- * plus a real SAF change-storage action) → Images (the six demo scenes,
- * all selected by default) → Labels (chips, max 8, seed "Object").
+ * §4 New project — a 3-step creation form on one scrollable screen
+ * (docs/03 §4, trimmed for the real app): Name (32 chars + live slug
+ * preview) → Location (folder picker sheet: workspace root, existing
+ * subfolders, create-new-folder, plus a real SAF change-storage action)
+ * → Labels (chips, max 8, seed "Object").
  *
- * Create → folder created in the workspace with the demo images rendered
- * into it → toast `Project created` → the new project's detail screen.
+ * The project starts EMPTY — real images are added afterwards from the
+ * project screen (photo picker) or by dropping files into the project
+ * folder, where the rescan picks them up. There is deliberately no
+ * image/scene picking here.
+ *
+ * Create is always live: with a blank name it asks for one instead of
+ * sitting in a washed-out disabled state. → toast `Project created` →
+ * the new project's detail screen.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -96,7 +98,6 @@ fun NewProjectScreen(
 
     var name by remember { mutableStateOf("") }
     var parentFolder by remember { mutableStateOf("") } // "" = workspace root
-    val selectedScenes = remember { mutableStateListOf<String>().apply { addAll(SceneLibrary.scenes.map { it.id }) } }
     val labels = remember { mutableStateListOf("Object") }
     val subfolders = remember { mutableStateListOf<String>() }
 
@@ -145,7 +146,7 @@ fun NewProjectScreen(
         if (parentFolder.isNotEmpty()) append("/").append(parentFolder)
         append("/").append(slug)
     }
-    val canCreate = name.isNotBlank() && selectedScenes.isNotEmpty() && !busy
+    val canCreate = name.isNotBlank() && !busy
 
     Column(modifier = Modifier.fillMaxSize()) {
         LoomScreenHeader(title = "New project", onBack = onBack)
@@ -200,25 +201,9 @@ fun NewProjectScreen(
                 }
             }
 
-            // ── 3. Images ───────────────────────────────────────────────────
+            // ── 3. Labels ───────────────────────────────────────────────────
             Spacer(Modifier.height(8.dp))
-            SectionLabel("3. Images", trailing = {
-                Text(
-                    text = "${selectedScenes.size} of ${SceneLibrary.scenes.size} selected",
-                    style = loomType.monoSmall,
-                    color = c.textMuted,
-                )
-            })
-            ScenePickerGrid(
-                selected = { id -> id in selectedScenes },
-                onToggle = { id ->
-                    if (id in selectedScenes) selectedScenes.remove(id) else selectedScenes.add(id)
-                },
-            )
-
-            // ── 4. Labels ───────────────────────────────────────────────────
-            Spacer(Modifier.height(8.dp))
-            SectionLabel("4. Labels")
+            SectionLabel("3. Labels")
             LoomCard(contentPadding = PaddingValues(14.dp)) {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -245,17 +230,23 @@ fun NewProjectScreen(
             Spacer(Modifier.height(14.dp))
             LoomButton(
                 onClick = {
-                    if (!canCreate) return@LoomButton
+                    if (busy) return@LoomButton
+                    if (name.isBlank()) {
+                        vm.toast("Give the project a name first", ToastIcon.WARN)
+                        return@LoomButton
+                    }
                     busy = true
                     scope.launch {
                         val project = vm.repository.createProject(
                             name = name,
-                            sceneIds = selectedScenes.toList(),
+                            // Projects start EMPTY — images are added from the
+                            // project screen or dropped into the folder.
+                            sceneIds = emptyList(),
                             labelNames = labels.take(LoomRules.LABEL_MAX).toList(),
                             parentFolder = parentFolder.ifEmpty { null },
                         )
                         busy = false
-                        vm.toast("Project created", ToastIcon.CHECK)
+                        vm.toast("Project created — add images next", ToastIcon.CHECK)
                         onCreated(project.id)
                     }
                 },
@@ -387,77 +378,6 @@ private fun FolderOption(path: String, selected: Boolean, onClick: () -> Unit) {
         )
         if (selected) {
             Icon(IconCheck, contentDescription = null, tint = c.pos, modifier = Modifier.size(16.dp))
-        }
-    }
-}
-
-/** 2-column demo-scene picker: 4:3 art frame + mint check badge + file name. */
-@Composable
-private fun ScenePickerGrid(
-    selected: (String) -> Boolean,
-    onToggle: (String) -> Unit,
-) {
-    val c = loomColors
-    val scenes = SceneLibrary.scenes
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        scenes.chunked(2).forEach { rowScenes ->
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                rowScenes.forEach { scene ->
-                    val isSelected = selected(scene.id)
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                            ) { onToggle(scene.id) },
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(4f / 3f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(c.surface2)
-                                .border(
-                                    1.dp,
-                                    if (isSelected) c.pos else c.hairline,
-                                    RoundedCornerShape(8.dp),
-                                ),
-                        ) {
-                            SceneArt(
-                                scene = scene,
-                                modifier = Modifier.fillMaxSize(),
-                                mode = com.testplaybyte.loom.ui.components.ImageScaleMode.FILL,
-                            )
-                            if (isSelected) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(6.dp)
-                                        .size(20.dp)
-                                        .clip(CircleShape)
-                                        .background(c.pos),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Icon(
-                                        IconCheck, contentDescription = null,
-                                        tint = Color(0xFF10240F), modifier = Modifier.size(13.dp),
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = scene.file,
-                            style = loomType.monoSmall,
-                            color = c.textMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                if (rowScenes.size == 1) Spacer(Modifier.weight(1f))
-            }
         }
     }
 }

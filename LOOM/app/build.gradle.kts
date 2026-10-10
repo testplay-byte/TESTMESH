@@ -70,6 +70,8 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.datastore.preferences)
+    // Magic Touch smart selection (MediaPipe InteractiveSegmenter).
+    implementation(libs.mediapipe.tasks.vision)
 
     // Compose — BOM-managed versions (docs/06-android-guide.md §1).
     implementation(platform(libs.androidx.compose.bom))

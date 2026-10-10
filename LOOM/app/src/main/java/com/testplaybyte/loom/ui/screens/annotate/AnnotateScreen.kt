@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -44,8 +45,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -54,8 +57,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.testplaybyte.loom.data.image.ImageStore
 import com.testplaybyte.loom.data.scene.CompiledScene
+import com.testplaybyte.loom.data.seg.SmartSegmenter
 import com.testplaybyte.loom.data.scene.SceneLibrary
 import com.testplaybyte.loom.domain.mesh.MeshMath
+import com.testplaybyte.loom.domain.seg.MaskToPolygon
 import com.testplaybyte.loom.domain.model.ImageState
 import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.ImageStatus
@@ -98,6 +103,7 @@ import com.testplaybyte.loom.ui.icons.IconZoomOut
 import com.testplaybyte.loom.ui.theme.LoomMotion
 import com.testplaybyte.loom.ui.theme.loomColors
 import com.testplaybyte.loom.ui.theme.loomType
+import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -128,6 +134,7 @@ fun AnnotateScreen(
     onExit: () -> Unit,
 ) {
     val c = loomColors
+    val context = LocalContext.current
     val projects by vm.projects.collectAsState()
     val settings by vm.settings.collectAsState()
     val project = projects.find { it.id == projectId }
@@ -179,6 +186,8 @@ fun AnnotateScreen(
         }
         state.reset(project.stateOf(image.id))
         loadedImageId = image.id
+        segImageId[0] = image.id
+        lastSig[0] = sigOf(state.present)
     }
 
     // ── autosave (300ms debounce, settings-gated) ────────────────────────
@@ -189,42 +198,99 @@ fun AnnotateScreen(
         vm.repository.saveImageState(project.id, image.id, state.present)
     }
 
-    // ── auto-suggest: re-sculpt 600ms after a dot change ─────────────────
-    val dotsBaseline = remember { intArrayOf(state.present.dots.size) }
+    // ── auto-suggest engine ──────────────────────────────────────────────
+    //
+    // Two mutually exclusive paths per image kind:
+    //  · SCENE images (seeded demo art): deterministic anchor sculpt —
+    //    the exact prototype mesh.ts semantics.
+    //  · REAL PHOTOS: Magic Touch — the prompt dots (+/−) and brush
+    //    strokes drive the MediaPipe InteractiveSegmenter; the traced
+    //    mask contour becomes the mesh. Every dot add/MOVE/remove and
+    //    every brush stroke re-runs it (600ms debounce, deferred while a
+    //    gesture is live).
+    val segmenter = remember { SmartSegmenter(context) }
+    DisposableEffect(Unit) { onDispose { segmenter.close() } }
+    var segRequest by remember { mutableIntStateOf(0) }
+    val segImageId = remember { arrayOf<String?>(null) }   // image the request belongs to
+    val lastSig = remember { arrayOf<String?>(null) }      // last prompt signature seen
     var suppressAuto by remember { mutableStateOf(false) }
-    LaunchedEffect(state.present.dots.size, image.id) {
-        val count = state.present.dots.size
-        val base = dotsBaseline[0]
-        dotsBaseline[0] = count
+
+    val promptSig = remember(state.present.dots, state.present.strokes) { sigOf(state.present) }
+
+    LaunchedEffect(promptSig, image.id, photo) {
+        if (promptSig == lastSig[0]) return@LaunchedEffect
+        lastSig[0] = promptSig
         if (suppressAuto) {
             suppressAuto = false
             return@LaunchedEffect
         }
-        if (base == count) return@LaunchedEffect
         state.sculpting = true
         delay(SUGGEST_DEBOUNCE_MS)
         while (state.gestureActive) delay(LoomMotion.SUGGEST_DEFER_REARM_MS)
-        val hasPos = state.present.dots.any { it.isPos }
-        if (!hasPos && state.present.mesh == null) {
+
+        if (image.sceneId != null) {
+            // ── deterministic sculpt (prototype path, scene anchors) ────
+            val hasPos = state.present.dots.any { it.isPos }
+            if (!hasPos && state.present.mesh == null) {
+                state.sculpting = false
+                return@LaunchedEffect
+            }
+            state.commit { prev ->
+                prev.copy(
+                    mesh = if (hasPos) {
+                        MeshMath.buildMesh(
+                            SceneLibrary.byId(image.sceneId ?: "kitchen").target.anchors.map { a -> Pt(a.first, a.second) },
+                            LoomRules.clampDensity(state.densityDraft ?: prev.density),
+                            prev.dots,
+                        )
+                    } else {
+                        null
+                    },
+                )
+            }
+            state.meshGen++
             state.sculpting = false
-            return@LaunchedEffect
-        }
-        state.commit { prev ->
-            prev.copy(
-                mesh = if (hasPos) {
-                    MeshMath.buildMesh(
-                        SceneLibrary.byId(image.sceneId ?: "kitchen").target.anchors.map { a -> Pt(a.first, a.second) },
-                        LoomRules.clampDensity(state.densityDraft ?: prev.density),
-                        prev.dots,
+            pulseNow()
+        } else {
+            // ── Magic Touch (real photos) ────────────────────────────────
+            val bmp = photo
+            val hasPrompts = state.present.dots.isNotEmpty() || state.present.strokes.isNotEmpty()
+            if (bmp == null || !hasPrompts) {
+                state.sculpting = false
+                if (bmp == null) lastSig[0] = null // photo still decoding — re-arm
+                return@LaunchedEffect
+            }
+            val layout = PhotoLayout.of(bmp.width, bmp.height)
+            segImageId[0] = image.id
+            val specs = buildSegSpecs(state.present, layout)
+            segRequest = segmenter.segment(
+                bmp.asAndroidBitmap(),
+                specs,
+                { requestId, mask, w, h ->
+                    if (requestId != segRequest || loadedImageId != segImageId[0]) return@segment
+                    val poly = MaskToPolygon.trace(mask, w, h)
+                    if (poly.isEmpty()) {
+                        state.sculpting = false
+                        vm.toast("No object found — put a + dot on it", ToastIcon.WARN)
+                        return@segment
+                    }
+                    val world = poly.map { layout.imageToWorld(it.x, it.y) }
+                    val ring = MeshMath.resampleRing(
+                        world,
+                        LoomRules.clampDensity(state.densityDraft ?: state.present.density),
                     )
-                } else {
-                    null
+                    state.commit { prev -> prev.copy(mesh = ring) }
+                    state.meshGen++
+                    state.sculpting = false
+                    pulseNow()
+                },
+                { requestId, message ->
+                    if (requestId != segRequest || loadedImageId != segImageId[0]) return@segment
+                    state.sculpting = false
+                    vm.toast("Smart mask failed: $message", ToastIcon.WARN)
                 },
             )
         }
-        state.meshGen++
-        state.sculpting = false
-        pulseNow()
     }
 
     // ── exit flush ───────────────────────────────────────────────────────
@@ -454,11 +520,10 @@ fun AnnotateScreen(
                         scope.launch {
                             delay(LoomMotion.DENSITY_REMESH_COMMIT_MS)
                             if (state.densityDraft == v) {
-                                val anchors = SceneLibrary.byId(image.sceneId ?: "kitchen").target.anchors
                                 state.commit { prev ->
                                     prev.copy(
                                         density = v,
-                                        mesh = prev.mesh?.let { MeshMath.buildMesh(anchors.map { a -> Pt(a.first, a.second) }, v, prev.dots) },
+                                        mesh = remeshForImage(image, v, prev),
                                     )
                                 }
                                 state.densityDraft = null
@@ -518,10 +583,10 @@ fun AnnotateScreen(
 
     // ── sheets ───────────────────────────────────────────────────────────
     LoomSheet(open = helpOpen, onClose = { helpOpen = false }, title = "Canvas guide") {
-        GuideRow(IconDotPlus, "Prompt dots", "+ dots mark what to include, − dots what to avoid. The mesh bends toward your dots.")
+        GuideRow(IconDotPlus, "Prompt dots & Magic Touch", "+ dots mark what to include, − dots what to avoid. On photos the Magic Touch model turns them into a precise mask; the mesh then hugs the object.")
         GuideRow(IconMesh, "Auto mesh & density", "The mesh grows itself from your dots — add or remove + dots and it re-sculpts. Density sets its vertex count; remeshing keeps your dots.")
         GuideRow(IconSettings, "Object label", "Once a mesh exists the object bar rises in with the object it belongs to — tap the object chip or the gear to edit the mesh: pick its class, tune density, check the vertex count, remove it.")
-        GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe follows your finger. Tap an edge midpoint to add one; long-press or Delete removes the selected vertex, arrows nudge by 8.")
+        GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe follows your finger. Tap an edge midpoint to add one; long-press or Delete removes the selected vertex, Tap an edge midpoint to add one; long-press or Delete removes the selected vertex.")
         GuideRow(IconBrush, "Brush & eraser", "Paint an exclusion to keep the mesh out of an area. Tap a painted stroke with the eraser to remove it.")
         GuideRow(IconTag, "Image tags", "Flag the image itself — Blurry, Occluded, Low light or your own. Tags sit in the top bar, ride with the annotations and export with the dataset.")
         GuideRow(IconPan, "Gestures", "Pan with one finger, pinch or scroll to zoom 50–500%, double-tap for 2×. Undo and redo live in the top bar.")
@@ -667,13 +732,7 @@ fun AnnotateScreen(
                 contentDescription = "Mesh density",
                 suffix = "pts",
                 onChange = { v ->
-                    val anchors = SceneLibrary.byId(image.sceneId ?: "kitchen").target.anchors
-                    state.commit { prev ->
-                        prev.copy(
-                            density = v,
-                            mesh = prev.mesh?.let { MeshMath.buildMesh(anchors.map { a -> Pt(a.first, a.second) }, v, prev.dots) },
-                        )
-                    }
+                    state.commit { prev -> prev.copy(density = v, mesh = remeshForImage(image, v, prev)) }
                     state.meshGen++
                 },
             )
@@ -841,6 +900,71 @@ private fun EmptyAnnotate(onExit: () -> Unit) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Letterbox layout of a photo inside the 800×600 world — the exact
+ * mapping [com.testplaybyte.loom.ui.screens.annotate.CanvasStage] uses in
+ * drawPhoto, exposed so prompt points can move between world and image
+ * pixel coordinates (the segmenter works in image pixels).
+ */
+private data class PhotoLayout(val s: Float, val dx: Float, val dy: Float) {
+    fun imageToWorld(ix: Float, iy: Float) = Pt(ix * s + dx, iy * s + dy)
+    fun worldToImage(wx: Float, wy: Float) = Pt((wx - dx) / s, (wy - dy) / s)
+
+    companion object {
+        fun of(pw: Int, ph: Int): PhotoLayout {
+            val s = min(800f / pw, 600f / ph)
+            return PhotoLayout(s, (800f - pw * s) / 2f, (600f - ph * s) / 2f)
+        }
+    }
+}
+
+/** Prompt signature: any dot add/move/remove or brush change re-sculpts. */
+private fun sigOf(s: com.testplaybyte.loom.domain.model.ImageState): String = buildString {
+    s.dots.forEach { append("${it.kind}:${it.x.toInt()},${it.y.toInt()};") }
+    append('|')
+    s.strokes.forEach { append("${it.pts.size},") }
+}
+
+/**
+ * Density change while a mesh exists: scene images resculpt from their
+ * anchors (prototype semantics); photos resample the CURRENT ring — a
+ * photo has no anchor set, and its shape came from the segmentation.
+ */
+private fun remeshForImage(
+    image: com.testplaybyte.loom.domain.model.ProjectImage,
+    density: Int,
+    prev: com.testplaybyte.loom.domain.model.ImageState,
+): List<Pt>? {
+    if (image.sceneId != null) {
+        val anchors = SceneLibrary.byId(image.sceneId).target.anchors
+        return MeshMath.buildMesh(anchors.map { a -> Pt(a.first, a.second) }, density, prev.dots)
+    }
+    val mesh = prev.mesh ?: return null
+    return if (mesh.size >= 3) MeshMath.resampleRing(mesh, density) else mesh
+}
+
+/**
+ * Builds the Magic Touch stroke list from the persisted prompts:
+ * + dots → POSITIVE strokes, − dots → NEGATIVE strokes, exclusion brush
+ * strokes → NEGATIVE scribbles (thinned, capped). Coordinates convert
+ * from world (800×600) into image pixels via [layout].
+ */
+private fun buildSegSpecs(
+    state: com.testplaybyte.loom.domain.model.ImageState,
+    layout: PhotoLayout,
+): List<SmartSegmenter.Spec> {
+    val specs = ArrayList<SmartSegmenter.Spec>()
+    state.dots.forEach { d ->
+        val ip = layout.worldToImage(d.x, d.y)
+        specs.add(SmartSegmenter.Spec(listOf(ip), d.isPos))
+    }
+    state.strokes.forEach { st ->
+        val pts = st.pts.map { layout.worldToImage(it.x, it.y) }
+        if (pts.isNotEmpty()) specs.add(SmartSegmenter.Spec(pts, positive = false))
+    }
+    return specs
+}
 
 private fun toggleTag(
     state: AnnotateState,
