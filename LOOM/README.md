@@ -2,10 +2,14 @@
 
 Loom is a LabelMe-style **image-annotation workbench for building
 segmentation training datasets on Android**. You create a *project* (a
-folder on device + images + label classes), annotate each image by planting
-**prompt dots** (+/−) around an object — a polygon **mesh** sculpts itself
-around the object through a deterministic local algorithm — then **export**
-the dataset in a standard ML format (Loom JSON / COCO / YOLO / Pascal VOC).
+folder on device + images + label classes), then annotate each image with
+**Magic Touch** smart selection — plant **prompt dots** (+/−) on an object
+or draw around it with the brush, and an on-device MediaPipe
+InteractiveSegmenter masks the object; the mask is traced into an
+**adaptive polygon mesh** that hugs curvature (dense on fingertips, two
+points on straight runs). An image holds any number of **objects**, each
+saved as its own editable polygon. Every image gets a **LabelMe v5 JSON
+sidecar**; datasets **export** to Loom JSON / COCO / YOLO / Pascal VOC.
 
 Built from the full "Loom" design handoff package (warm graphite + signal
 amber, Space Grotesk + JetBrains Mono; dark theme default, light switchable).
@@ -17,12 +21,12 @@ policy: local device is low-powered).
 
 | # | Screen | Notes |
 |---|--------|-------|
-| 1 | Splash | Stroke draw-on brand mark, auto-advance 2250ms, tap to skip |
-| 2 | Permissions | REAL grants: media permission + SAF folder picker; limited-access bypass |
-| 3 | Projects | Project cards w/ stepped-blob progress panel, thumb stacks, FAB, bottom nav |
-| 4 | New project | Name → Location → Images (6 demo scenes) → Labels (max 8) |
-| 5 | Project detail | Stats card, labels row, masonry grid, overflow sheet |
-| 6 | Annotate | THE canvas: prompt dots → auto-mesh, vertex editing + loupe, brush, eraser |
+| 1 | Splash | The brand mark IS the splash — logo-only, full draw-on/weave/pop animation, tap to skip |
+| 2 | Permissions | Two real grants: media permission + SAF storage-folder picker; limited-access bypass |
+| 3 | Projects | Project cards w/ stepped-blob progress panel, overlapping thumb stacks, rounded-square FAB, bottom nav |
+| 4 | New project | Name + Labels only — the folder is the storage folder + the slug; starts empty |
+| 5 | Project detail | Stats card, labels row, masonry grid, photo-picker "Add images", overflow sheet |
+| 6 | Annotate | THE canvas: Magic Touch dots/brush → adaptive mesh, multi-object chips, vertex editing, loupe |
 | 7 | Export | 4 formats with REAL writes into the project folder, share, JSON preview |
 | 8 | Settings | Theme, canvas defaults, undo depth, autosave, storage readout, clear data |
 
@@ -35,10 +39,15 @@ single source of truth. The app asks for a folder once (Permissions →
 
 ```
 <workspace>/                          ← user-picked (SAF) or app-private fallback
-  object-scan-demo/                   ← one folder per project
+  my-dataset/                         ← one folder per project
     loom-project.json                 app metadata (ids, labels, image list, options)
-    annotations.json                  Loom JSON — every dot/mesh/stroke/tag/status,
-                                      kept up to date on every save (world coords)
+    annotations.json                  INTERNAL Loom JSON working file (world coords,
+                                      dots/tags/status/strokes — fast whole-project
+                                      state for the app's own rescan)
+    hand.jpg
+    hand.json                         ← LabelMe v5.11 sidecar PER IMAGE — the
+                                      user-facing annotation file (real pixel
+                                      coords, one shape per object)
     IMG_2041.jpg …                    the images (demo scenes render to real JPEGs;
                                       imported photos are copied in)
     labels/, xml/, README.txt         written by Export only
@@ -46,38 +55,65 @@ single source of truth. The app asks for a folder once (Permissions →
 
 Consequences, by design:
 
-- **Creating a project creates a real folder** in the workspace; demo
-  images are rendered into it so the folder is a genuine dataset.
+- **Creating a project creates a real folder** in the workspace (name +
+  slug; no location picker — that folder is wherever the user's storage
+  folder is). Projects start empty; images come from the photo picker or
+  are dropped into the folder by hand.
 - **Images added by hand are detected**: every visit rescans each project
   folder (and the workspace root) for image files and gives them fresh,
   empty annotation states. Deleting a project removes only Loom's own data
-  (metadata + annotations) — user images on disk are never touched, and the
+  (metadata + sidecars) — user images on disk are never touched, and the
   folder is remembered as dismissed so it doesn't auto-reappear.
-- **Every JSON is written there** — folders are portable; drop
-  `annotations.json` back in and the project re-opens (adopted datasets).
+- **LabelMe sidecars are authoritative for objects**: hand-edited or
+  externally produced `<image>.json` files are adopted on rescan. The
+  in-progress shape is marked `description: "working"` so it restores as
+  the working mesh, never as a duplicate object.
 - The app works fully without any grant: with "Continue with limited
   access" the same layout lives in app-private storage
   (`filesDir/workspace/`), changeable later in Settings.
 
-## The "smart model" (deterministic, not ML)
+## Magic Touch (MediaPipe InteractiveSegmenter)
 
-`domain/mesh/MeshMath.kt` is an exact port of the prototype's `lib/mesh.ts`
-— constants included (`PULL_RADIUS 150, PULL_SIGMA 78, PULL_MAX 30,
-PUSH_MAX 42`, Catmull-Rom ×14). No Suggest button: when dots change the
-mesh re-sculpts itself after a **600 ms debounce** (deferred while a gesture
-is live, suppressed across undo/redo/switch/clear/mesh-removal), with a
-"sculpting…" status pill and a haptic pulse. Density (6–40 pts) live-remeshes
-on the stepper and commits 450 ms after the last press.
+`data/seg/SmartSegmenter.kt` wraps MediaPipe's InteractiveSegmenter
+("Magic Touch", the Edge Gallery Scrapbook stack): the bundled
+`interactive_segmentation.task` model (30.5 MB, CPU, int8), per-stroke
+POSITIVE/NEGATIVE polarity, confidence threshold 0.5 with a 0.3 fallback
+pass from the same confidence map. On real photos every **+ dot is a
+positive prompt stroke, every − dot a negative one, and the brush draws
+positive** (draw around an object to select it); strokes are consumed on
+success. The mask is traced DENSE by `domain/seg/MaskToPolygon.kt`
+(marching squares → loop chaining → closed-shape RDP) and fitted
+**adaptively** by `MeshMath.fitRing` — a binary search on the RDP epsilon
+so vertices land where the boundary curves, not uniformly. `autoFitRing`
+picks the optimal minimal count (eps = 0.006 × max bbox dim) and the
+stepper range is **3–200 pts** (hold a stepper button and the repeat
+accelerates 250→60 ms). Demo scenes keep the deterministic anchor sculpt
+from `mesh.ts` instead — they are synthetic art with known anchors.
 
-## Canvas interaction contract (docs/04)
+## Multi-object model
 
-- Tools: pan · +dot · −dot · exclusion brush · mesh-vertex edit · eraser.
-- Camera: fit-contain, pinch 50–500 %, double-tap 2×, pan with clamp; the
-  drafting grid is world-fixed (pans and zooms with the image).
-- Vertex edit: drag with **loupe** (112 px @ 3.2×, 72 px above the finger),
-  tap-near-edge inserts, long-press (550 ms) deletes, nudge arrows move by
-  8 world units; every completed gesture = exactly one undo unit.
-- Autosave 300 ms debounce; **flush on image switch and canvas exit**.
+An `ImageState` carries the working mesh (in progress) plus
+`objects: List<ObjAnn>` (saved). "Save object" commits the working mesh,
+clears the prompts, and you keep annotating; object chips in the dock
+re-open a saved object for vertex editing; exports emit every object
+(COCO/YOLO/VOC skip unlabeled ones). Canvas renders saved objects dimmed
+under the working mesh; the loupe parks in a fixed corner (never under the
+finger), the mesh renders as the straight-line polygon it exports as, and
+zoom goes to 10×.
+
+## Canvas interaction contract
+
+- Tools: pan · +dot · −dot · brush (select on photos / exclude on scenes) ·
+  mesh-vertex edit · eraser. Tap a dot = place; press a dot = move it.
+- Camera: fit-contain, pinch 50–1000 %, double-tap 2×, pan with clamp;
+  the drafting grid is world-fixed and drawn once, behind the art, inside
+  the frame.
+- Vertex edit: drag with the corner **loupe** (112 px @ 3.2×), tap-near-edge
+  inserts, selected vertex deletes via the Delete chip; every completed
+  gesture = exactly one undo unit.
+- Autosave 300 ms debounce (sidecars without imageData); **flush on image
+  switch and canvas exit** (sidecars embed the image bytes).
+- First-run hint: square-ish card, 2 s, tap-dismiss, once ever.
 - Image tags (max 8) ride the same history and export with the dataset.
 
 ## Architecture
@@ -85,19 +121,22 @@ on the stepper and commits 450 ms after the last press.
 ```
 app/src/main/java/com/testplaybyte/loom/
 ├── domain/
-│   ├── model/    Models.kt (Pt/Dot/Stroke/ImageState/Project/settings/perms)
+│   ├── model/    Models.kt (Pt/Dot/Stroke/ObjAnn/ImageState/Project/settings/perms)
 │   │             + LoomRules (validation, slugs, clamps, split rule)
-│   ├── mesh/     MeshMath.kt            ← pure port of mesh.ts (tested)
+│   ├── mesh/     MeshMath.kt            ← mesh.ts port + fitRing/autoFitRing (tested)
+│   ├── seg/      MaskToPolygon.kt       ← mask → polygon, pure Kotlin (tested)
 │   ├── history/  UndoStack.kt           ← bounded undo/redo (tested)
-│   └── export/   LoomJsonCodec.kt       ← the primary annotation format
+│   └── export/   LoomJsonCodec.kt       ← internal working file + Loom JSON export
+│                 LabelMeCodec.kt        ← per-image LabelMe v5 sidecars (tested)
 │                 ProjectMetaCodec.kt    ← loom-project.json
 │                 DatasetWriters.kt      ← COCO / YOLO / VOC (tested)
 ├── data/
-│   ├── prefs/    LoomPreferences.kt     ← DataStore (settings/perms/URI)
+│   ├── prefs/    LoomPreferences.kt     ← DataStore (settings/perms/URI/hint)
 │   ├── workspace/Workspace.kt           ← SAF tree ⭄ app-private fallback
 │   ├── scene/    SceneDsl.kt            ← scene art as pure data (SVG-port)
 │                 SceneLibrary.kt        ← the six demo scenes, 1:1
 │                 SceneImage.kt          ← demo scenes → real JPEG files
+│   ├── seg/      SmartSegmenter.kt      ← MediaPipe InteractiveSegmenter wrapper
 │   ├── image/    ImageStore.kt          ← bounded, cached workspace decodes
 │   └── repo/     LoomRepository.kt      ← folder-first source of truth
 ├── ui/
@@ -111,29 +150,36 @@ app/src/main/java/com/testplaybyte/loom/
 
 Design rules kept from the handoff package:
 
-1. **All annotation geometry lives in world space (800×600)** — stored data
-   never depends on device size, zoom or photo resolution. Demo scenes are
-   authored in that world; real photos are letterboxed into it and exports
-   scale world → real pixels (see `LoomJsonCodec`'s header for the
-   working-file vs export-file coordinate policy).
-2. **Pure cores are JVM-tested** (50 tests): mesh math incl. the docs' worked
-   example, undo/redo semantics, the Loom JSON codec, COCO/YOLO/VOC writers,
+1. **All annotation geometry lives in world space (800×600)** — stored
+   internal data never depends on device size, zoom or photo resolution.
+   Demo scenes are authored in that world; real photos are letterboxed
+   into it; exports and LabelMe sidecars invert the letterbox exactly
+   (uniform scale + centering — never an anisotropic stretch).
+2. **Pure cores are JVM-tested** (60 tests): mesh math incl. the docs'
+   worked example, adaptive fitting, mask→polygon, undo/redo semantics,
+   the LabelMe codec, the Loom JSON codec, COCO/YOLO/VOC writers,
    validation rules, masonry hash, DataStore codecs. CI runs them before
    assembling.
 3. **No invented screens, colors or copy.** Values come from
    `reference/tokens.json`; icons are verbatim path ports; the copy deck is
-   verbatim (one intentional change: Settings → About shows the real
-   repository name).
+   verbatim (intentional changes: Settings → About shows the real
+   repository name; the canvas guide copy documents the shipped behavior).
 
 ## Documented deviations from the handoff package
 
 | Deviation | Why |
 |---|---|
-| Storage is folder-first, not Room | The owner's requirement: the picked workspace folder is used for everything and must detect hand-added images. `loom-project.json` + `annotations.json` are the database; DataStore holds settings/perms. |
+| Storage is folder-first, not Room | The owner's requirement: the picked workspace folder is used for everything and must detect hand-added images. `loom-project.json` + sidecars are the database; DataStore holds settings/perms. |
 | Persistence has no Room at all | With the folder as source of truth, a second DB would only risk divergence. |
+| Multi-object annotations | The prototype allowed ONE mesh per image; the owner requires several objects per image with save/re-open semantics. |
+| Per-image LabelMe sidecars are the user-facing format | Owner requirement ("EXAMPLE LABEL JSON"): each image gets its own LabelMe v5.11 `.json` in real pixels. `annotations.json` remains as the app's internal whole-project state (dots/tags/status are not representable in LabelMe). |
+| Magic Touch is a real ML model, not the deterministic "smart model" | Owner requirement: Edge Gallery Scrapbook semantics (MediaPipe InteractiveSegmenter). The deterministic mesh.ts sculpt remains for demo scenes and as the dot-influence fallback. |
+| Density range 3–200, adaptive vertex placement | Owner requirement; the prototype spec'd 6–40 uniform arc-length points. |
+| No location step in New Project, no image picking | Owner requirement: the folder is the storage folder + slug; projects start empty and images arrive via picker/folder drop. |
+| Permissions screen shows exactly two grants | Owner requirement: no "All files" card — SAF tree access is the scoped permission. |
 | "Add images" action on Project detail | Necessary for a real dataset tool (the spec defers the photo picker; the folder scanner alone would leave imported photos with no entry point). Uses the system photo picker; files are copied into the project folder. |
 | Settings → About repository string | Shows the real repository (`testplay-byte/TESTMESH`) instead of the prototype's demo repo name. |
-| Splash mark fades/draws via PathMeasure trim | Compose `ImageVector` cannot trim paths; the mark's strokes draw on 0→1 (PathMeasure), arcs fade at 55 %, node dots pop at 75 %. |
+| Splash is the logo only, fully animated | Owner feedback: no bar/tagline; the animation lives on the mark (PathMeasure trim + weaving arcs + spring dots + settle scale). |
 | YOLO export = segmentation format | Meshes are polygons; `labels/*.txt` carry `classIndex x1 y1 …` and the export README documents the choice (per docs/05 §5). |
 
 ## Build & release
@@ -155,9 +201,11 @@ Design rules kept from the handoff package:
 - AGP 9.0.1 with built-in Kotlin + the Compose compiler plugin
   (`org.jetbrains.kotlin.plugin.compose`) — same toolchain as the sibling
   apps; verified against their CI-proven Gradle wrapper (9.2.1).
-- Dependencies are minimal: Compose (BOM 2024.12.01), Navigation Compose,
-  Lifecycle, DataStore, DocumentFile. No Room, no Coil (hand-rolled,
-  workspace-aware bitmap loading), no kotlinx.serialization (org.json, which
-  the JVM tests stub with the standard artifact).
+- Dependencies: Compose (BOM 2024.12.01), Navigation Compose, Lifecycle,
+  DataStore, DocumentFile, **MediaPipe tasks-vision 1.1.0** (Magic Touch;
+  the 30.5 MB model ships as a noCompress asset so it can be mmap'd). No
+  Room, no Coil (hand-rolled, workspace-aware bitmap loading), no
+  kotlinx.serialization (org.json, which the JVM tests stub with the
+  standard artifact).
 - Fonts: Space Grotesk + JetBrains Mono as variable TTFs in `res/font`,
   weights declared via `FontVariation`.
