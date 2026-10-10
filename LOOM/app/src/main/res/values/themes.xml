@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Base theme for the window before Compose takes over. Loom paints
+        everything itself (LoomTheme), so this only needs: no action bar,
+        warm-graphite background, transparent system bars so the Compose
+        edge-to-edge content shows through.
+    -->
+    <style name="Theme.Loom" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#191613</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

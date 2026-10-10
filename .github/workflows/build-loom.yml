@@ -1,0 +1,80 @@
+name: Loom Build
+
+on:
+  push:
+    branches: [main]
+    # Releases: push a tag like loom-v0.4.0 to publish a GitHub Release with
+    # the installable APK attached (see the release steps below).
+    tags: ['loom-v*']
+  workflow_dispatch:
+
+# Release creation needs to write (create release + upload asset).
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Repo root hosts multiple apps; Loom lives in LOOM/.
+    # (Mirrors the sibling workflows: same runners, JDK, caching.)
+    defaults:
+      run:
+        working-directory: LOOM
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v4
+
+      # JVM test gate before any APK: the deterministic mesh model (worked
+      # example), undo/redo semantics, the Loom JSON codec, the dataset
+      # writers (COCO/YOLO/VOC), the validation rules and the masonry hash.
+      - name: Unit tests (mesh, history, codecs, writers, rules)
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LOOM-debug
+          path: LOOM/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LOOM-release
+          path: LOOM/app/build/outputs/apk/release/app-release.apk
+
+      # ── GitHub Release (only on version tags) ────────────────────────────
+      # Both variants are signed with the committed project key, so every CI
+      # APK installs as an update over the previous one.
+      - name: Name release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/LOOM.apk"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: LOOM ${{ github.ref_name }}
+          files: LOOM.apk
+          body: |
+            LOOM ${{ github.ref_name }} — arm64-v8a only.
+            Loom is an image-annotation workbench: prompt dots → deterministic
+            auto-mesh, vertex editing with loupe, brush exclusions, tags, and
+            real exports (Loom JSON / COCO / YOLO / VOC) into the workspace
+            folder. Built by CI from `${{ github.sha }}`.

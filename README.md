@@ -675,7 +675,7 @@ mask→polygon options (hand-rolled chosen: no 20-80MB OpenCV).
 (`gradlew :app:testDebugUnitTest`; debug+test compile clean). Bugs the
 tests caught during development: two-sided loop walk folding the ring
 (−12% area), RDP anchored on adjacent ring points (edge slants), Builder
-API misuse. CI: new `.github/workflows/build-meshlabel.yml` (unit tests →
+API misuse. CI: new `.github/workflows/build-loom.yml` (unit tests →
 assembleDebug → assembleRelease(unsigned) → MESHLABEL-debug/-release
 artifacts).
 
@@ -696,18 +696,18 @@ tags:
 | App | Tag pattern | Release asset | Notes |
 |---|---|---|---|
 | AIMESHVISION | `aimeshvision-v*` (e.g. `aimeshvision-v2.1`) | `AIMESHVISION-release.apk` | signed with the project keystore → installs as an **update** over existing installs |
-| MESHLABEL | `meshlabel-v*` (e.g. `meshlabel-v1.0`) | `MESHLABEL.apk` | this app has no release keystore → the asset is the **debug-key** build (installable) |
+| LOOM | `loom-v*` (e.g. `loom-v0.4.0`) | `LOOM.apk` | signed with the committed project keystore (debug + release) → installs as an update |
 
 Cutting a release (CI-only, no local builds):
 1. Bump `versionCode`/`versionName` in the app's `app/build.gradle.kts`
    (AIMESHVISION: must increase `versionCode` for Play-style update
    semantics), commit to `main`, CI green.
 2. `git tag aimeshvision-v2.1 && git push <remote> aimeshvision-v2.1`
-   (or `meshlabel-vX.Y`).
+   (or `loom-vX.Y`).
 3. The matching workflow runs tests + both variants, then
    `softprops/action-gh-release@v2` creates the Release and attaches the
    APK. Regular `main` pushes keep producing the usual CI artifacts
-   (`AIMESHVISION-debug/-release`, `MESHLABEL-debug/-release`).
+   (`AIMESHVISION-debug/-release`, `LOOM-debug/-release`).
 
 
 ## 📐 Round 21 — high-resolution outline: the band leaves the mesh's grid (2026-10-09)
@@ -830,3 +830,52 @@ smooth.
 **Verification:** 15/15 tests green (single-bright-region canary, kernel truths incl. 255 at boundary / monotone / interior-clear / 10%-thin, contiguity envelope, registration class invariants).
 
 Version: AIMESHVISION **2.6** (versionCode 8) - release `aimeshvision-v2.6`.
+
+
+## 🏷️ Round 22 — LOOM: MeshLabel rebuilt as a full design-system app (2026-10-10)
+
+**MESHLABEL is retired.** The MeshLabel app was completely redesigned from a
+dedicated design handoff package (`loom-android-agent-package.zip` → docs,
+machine-readable tokens, and a React prototype as ground truth): new UI
+language ("Loom" — warm graphite + signal amber, Space Grotesk + JetBrains
+Mono, hairline borders, stepped-blob progress panel, masonry grid), new
+8-screen flow (splash, permissions, projects, new-project, project detail,
+annotate canvas, export, settings), and a folder-first data model.
+
+**LOOM/** (new Gradle project, replaces `MESHLABEL/`):
+
+- **Folder-first storage (owner requirement):** first run asks for a
+  workspace folder (real SAF tree picker). Projects = folders inside it
+  (`loom-project.json` + `annotations.json` + image files). Images added by
+  hand into a project folder are detected on rescan; every JSON is written
+  in place; datasets are portable (an `annotations.json` dropped into the
+  workspace re-opens as a project). Limited-access fallback = same layout in
+  app-private storage.
+- **The "smart model":** deterministic mesh algorithm — exact port of the
+  prototype's `mesh.ts` (Catmull-Rom ring → uniform resample → prompt-dot
+  influence, constants included). Dots re-sculpt the mesh 600ms after a
+  change (no button), density 6–40 live-remeshes; vertex editing with a
+  112px 3.2× loupe, edge-insert, long-press delete, nudge arrows; exclusion
+  brush + eraser; 50–500% camera; world-fixed drafting grid; bounded
+  undo/redo + 300ms autosave flushed on switch/exit.
+- **Real platform wiring:** photo-picker imports copied into the project
+  folder, SAF writes with real byte progress, real share (FileProvider),
+  real media permission, DataStore settings/perms, haptics.
+- **Exports:** Loom JSON (the working annotations file doubles as the
+  primary format), COCO, YOLO (segmentation), Pascal VOC — all with real
+  writes into the project folder and unit-tested writers.
+- **Stack:** Kotlin, Jetpack Compose (single activity), AGP 9 built-in
+  Kotlin + Compose compiler, minSdk 26/target 35, arm64-v8a only, manual DI.
+  Fonts bundled as variable TTFs.
+- **Tests:** 50 JVM tests — mesh math incl. the spec's worked example,
+  undo/redo semantics, Loom JSON codec round-trips, COCO/YOLO/VOC writers,
+  validation/slug/split rules, masonry FNV-1a hash, DataStore codecs.
+- **Signing change:** LOOM commits a project keystore (`loom.keystore`) —
+  debug AND release are signed with it, so CI APKs update-install over each
+  other.
+- CI: `.github/workflows/build-loom.yml` (tests → debug → release →
+  artifacts `LOOM-debug`/`LOOM-release`; tags `loom-v*` → GitHub Release
+  with `LOOM.apk`). Owner directive honored: **all builds/verification run
+  on GitHub Actions only** — no local Gradle runs.
+
+Version: LOOM **0.4.0** (versionCode 1) — first release `loom-v0.4.0`.
