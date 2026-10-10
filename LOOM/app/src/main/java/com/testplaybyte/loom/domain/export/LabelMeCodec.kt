@@ -111,7 +111,7 @@ object LabelMeCodec {
         for (i in 0 until shapes.length()) {
             val sh = shapes.optJSONObject(i) ?: continue
             val type = sh.optString("shape_type", "polygon")
-            if (type != "polygon" && type != "rectangle") continue
+            if (type != "polygon") continue
             val pts = ArrayList<Pt>()
             val arr = sh.optJSONArray("points") ?: continue
             for (j in 0 until arr.length()) {

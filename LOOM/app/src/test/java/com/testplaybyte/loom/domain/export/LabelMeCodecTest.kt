@@ -73,8 +73,8 @@ class LabelMeCodecTest {
         val im = com.testplaybyte.loom.domain.model.ProjectImage("im-1", "a.png", width = 800, height = 600)
         val st = ImageState(
             mesh = listOf(Pt(10f, 10f), Pt(50f, 10f), Pt(50f, 40f)),
-            labelId = "lb-2",
-            objects = listOf(ObjAnn("o", "lb-1", listOf(Pt(0f, 0f), Pt(5f, 0f), Pt(5f, 5f)))),
+            labelId = "lb-1",
+            objects = listOf(ObjAnn("o", "lb-2", listOf(Pt(0f, 0f), Pt(5f, 0f), Pt(5f, 5f)))),
         )
         val text = LabelMeCodec.encode(project(listOf(im)), im, st, imageBytes = null)
         val shapes = LabelMeCodec.decode(text)

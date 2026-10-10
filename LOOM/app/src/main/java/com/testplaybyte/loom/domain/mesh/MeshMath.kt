@@ -127,16 +127,18 @@ object MeshMath {
         for (i in 0 until 26) {
             val mid = (lo + hi) / 2f
             val simplified = com.testplaybyte.loom.domain.seg.MaskToPolygon.rdpClosed(dense, mid)
-            if (simplified.size < 3) { lo = mid; continue }
-            if (simplified.size > target) {
-                lo = mid
+            if (simplified.size < 3) {
+                hi = mid // eps collapsed the shape — too large
+            } else if (simplified.size > target) {
+                lo = mid // eps too small — still too many vertices
             } else {
-                best = simplified
+                best = simplified // within target — try smaller eps for detail
                 hi = mid
             }
             if (hi - lo < 0.05f) break
         }
-        return if (best.size in 3..target) best else dense
+        // Degenerate fallback: first [target] points (still a closed ring).
+        return if (best.size in 3..target) best else dense.take(max(3, target))
     }
 
     /**
