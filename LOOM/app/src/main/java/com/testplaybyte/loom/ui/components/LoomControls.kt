@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -432,28 +433,7 @@ private fun StepperHoldButton(
     ) {
         Icon(icon, contentDescription = description, tint = c.text, modifier = Modifier.size(15.dp))
     }
-
-@Composable
-private fun StepperButton(
-    icon: ImageVector,
-    enabled: Boolean,
-    description: String,
-    onClick: () -> Unit,
-) {
-    val c = loomColors
-    val interaction = remember { MutableInteractionSource() }
-    Box(
-        modifier = Modifier
-            .size(30.dp)
-            .clip(CircleShape)
-            .background(c.surface2)
-            .border(1.dp, c.hairlineStrong, CircleShape)
-            .alpha(if (enabled) 1f else 0.35f)
-            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(icon, contentDescription = description, tint = c.text, modifier = Modifier.size(15.dp))
-    }
+}
 }
 
 // ── Chips ─────────────────────────────────────────────────────────────────

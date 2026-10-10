@@ -7,6 +7,7 @@ import com.testplaybyte.loom.domain.model.Project
 import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.Stroke
 import java.util.Locale
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**

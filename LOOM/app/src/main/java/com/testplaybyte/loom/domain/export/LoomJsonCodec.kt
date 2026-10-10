@@ -101,8 +101,8 @@ object LoomJsonCodec {
             val s = if (scaleToRealPixels) minOf(800.0 / im.width, 600.0 / im.height) else 1.0
             val dx = if (scaleToRealPixels) (800.0 - im.width * s) / 2.0 else 0.0
             val dy = if (scaleToRealPixels) (600.0 - im.height * s) / 2.0 else 0.0
-            fun fx(x: Float) = round2((x - dx) / s)
-            fun fy(y: Float) = round2((y - dy) / s)
+            val fx: (Float) -> Double = { round2((it - dx) / s) }
+            val fy: (Float) -> Double = { round2((it - dy) / s) }
             val o = JSONObject()
             o.put("file", im.file)
             o.put("width", if (scaleToRealPixels) im.width else 800)
