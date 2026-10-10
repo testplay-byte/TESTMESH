@@ -100,9 +100,9 @@ private const val WORLD_W = 800f
 private const val WORLD_H = 600f
 private const val MIN_SCALE = 0.5f
 private const val MAX_SCALE = 10f
-private const val HIT_PX = 22f          // dots + vertices
-private const val SLOP_PX = 7f          // press → drag
-private const val EDGE_SNAP_PX = 14f    // edge tap → insert vertex
+private const val HIT_DP = 26f          // dots + vertices (density-independent)
+private const val SLOP_DP = 10f         // press → drag
+private const val EDGE_SNAP_DP = 14f    // edge tap → insert vertex
 private const val VERTEX_EPS = 1.5f     // world units
 private const val ERASER_HIT_WORLD = 24f
 private const val LOUPE_PX = 112f
@@ -125,13 +125,20 @@ fun CanvasStage(
     magnifier: Boolean,
     showHint: Boolean = false,
     onHintTap: () -> Unit = {},
+    onWarn: (String) -> Unit = {},
+    onCanvasFeedback: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val c = loomColors
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     var size by remember { mutableStateOf(IntSize.Zero) }
-    val gestures = remember { Gestures(state, scope) }
+    val gestures = remember { Gestures(state, scope) }.apply {
+        densityPx = density
+        onWarn = onWarn
+        onStrokeRemoved = onCanvasFeedback
+        onDotPlaced = onCanvasFeedback
+    }
 
     // Fit-contain once per image; re-clamp when the viewport changes.
     LaunchedEffect(size, state.present.hashCode()) {
@@ -208,10 +215,13 @@ fun CanvasStage(
                         style = Stroke(width = 1f / cam.scale),
                     )
 
-                    // exclusion strokes (below the mesh)
-                    for (s in state.strokes) drawStrokePath(s, c.neg)
+                    // prompt strokes (below the mesh): on real photos the
+                    // brush SELECTS (green, like + dots); on scenes it
+                    // EXCLUDES (coral) — matching what the segmenter does
+                    val strokeColor = if (scene == null && photo != null) c.pos else c.neg
+                    for (s in state.strokes) drawStrokePath(s, strokeColor)
                     (state.live as? Live.BrushLive)?.let { brush ->
-                        drawStrokePolyline(brush.pts, c.neg)
+                        drawStrokePolyline(brush.pts, strokeColor)
                     }
 
                     // saved objects sit under the working mesh, dimmer
@@ -264,12 +274,12 @@ fun CanvasStage(
                                     val selected = (state.selection as? Selection.Vertex)?.index == i
                                     drawCircle(
                                         color = Color(0xFFFFFDF6),
-                                        radius = 3.4f,
+                                        radius = if (selected) 5.5f else 3.4f,
                                         center = Offset(p.x, p.y),
                                     )
                                     drawCircle(
                                         color = if (selected) c.primary else c.mesh,
-                                        radius = 3.4f,
+                                        radius = if (selected) 5.5f else 3.4f,
                                         center = Offset(p.x, p.y),
                                         style = Stroke(width = if (selected) 2.2f else 1.8f),
                                     )
@@ -282,7 +292,7 @@ fun CanvasStage(
                     for ((i, d) in liveDots.withIndex()) {
                         val selected = (state.selection as? Selection.DotSel)?.id == d.id
                         // staggered pop: later dots lag slightly
-                        val stagger = (i * 0.06f)
+                        val stagger = (i % 16) * 0.06f
                         val s = clamp((dotPop.value - stagger) / (1f - stagger).coerceAtLeast(0.01f), 0.4f, 1f)
                         scale(s, s, pivot = Offset(d.x, d.y)) {
                             drawDot(d, dotSizeWorld.toFloat(), selected, c, cam.scale)
@@ -618,8 +628,13 @@ private class Gestures(
     private val scope: kotlinx.coroutines.CoroutineScope,
 ) {
     var viewport: IntSize = IntSize.Zero
+    /** densityPx set once from the composition; hit radii in real pixels. */
+    var densityPx: Float = 3f
     private var fitted = false
     private var userTouched = false
+    private val hitPx get() = HIT_DP * densityPx
+    private val slopPx get() = SLOP_DP * densityPx
+    private val edgeSnapPx get() = EDGE_SNAP_DP * densityPx
 
     private enum class Kind { NONE, PAN, PINCH, VERTEX, DOT, BRUSH }
     private var kind = Kind.NONE
@@ -708,7 +723,7 @@ private class Gestures(
     // ── hit tests ────────────────────────────────────────────────────────
 
     private fun hitDot(w: Pt): Dot? {
-        val r = HIT_PX / state.cam.scale
+        val r = hitPx / state.cam.scale
         var best: Dot? = null
         var bd = Float.MAX_VALUE
         for (d in state.dots) {
@@ -732,9 +747,11 @@ private class Gestures(
 
     // ── commits ──────────────────────────────────────────────────────────
 
-    private fun addDot(kind: DotKind, w: Pt) {
+    private fun addDot(kind: DotKind, w: Pt): Dot? {
         val dot = Dot(Ids.uid(if (kind == DotKind.POS) "dot" else "dotn"), kind, w.x, w.y)
         state.commit { prev -> prev.copy(dots = prev.dots + dot) }
+        onDotPlaced?.invoke()
+        return dot
     }
 
     /** Starts a dot MOVE gesture for the dot nearest [w] (must be a hit). */
@@ -771,6 +788,7 @@ private class Gestures(
     }
 
     var onWarn: ((String) -> Unit)? = null
+    var onDotPlaced: (() -> Unit)? = null
 
     // ── pointer loop ─────────────────────────────────────────────────────
 
@@ -781,8 +799,22 @@ private class Gestures(
                 val downPos = down.position
                 val downType = down.type
                 down.consume()
-                beginGesture(downPos, downType)
-                var pointerCount = 1
+                // a tool switch restarts pointerInput and cancels this
+                // coroutine mid-gesture — the finally guarantees the
+                // auto-suggest engine is never left frozen on gestureActive
+                try {
+                    beginGesture(downPos, downType)
+                    runGesture()
+                } finally {
+                    state.gestureActive = false
+                    state.live = null
+                    kind = Kind.NONE
+                }
+            }
+        }
+    }
+
+    private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.runGesture() {
                 while (true) {
                     val event = awaitPointerEvent()
                     val pressed = event.changes.filter { it.pressed }
@@ -791,7 +823,6 @@ private class Gestures(
                         if (kind != Kind.PINCH) beginPinch(pressed.map { it.position })
                         else updatePinch(pressed.map { it.position })
                         pressed.forEach { it.consume() }
-                        pointerCount = pressed.size
                         continue
                     }
                     if (kind == Kind.PINCH && pressed.size == 1) {
@@ -802,11 +833,8 @@ private class Gestures(
                     }
                     moveGesture(pressed[0].position, pressed[0].positionChange())
                     pressed.forEach { it.consume() }
-                    @Suppress("UNUSED_EXPRESSION") pointerCount
                 }
                 endGesture()
-            }
-        }
     }
 
     private fun beginGesture(pos: Offset, type: PointerType) {
@@ -828,13 +856,19 @@ private class Gestures(
                     // Press ON an existing dot = move it (tap adds, drag moves).
                     beginDotMove(w)
                 } else {
-                    addDot(DotKind.POS, w)
+                    addDot(DotKind.POS, w)?.let { d ->
+                        kind = Kind.DOT
+                        dotId = d.id
+                    }
                 }
             Tool.DOT_NEG ->
                 if (hitDot(w) != null) {
                     beginDotMove(w)
                 } else {
-                    addDot(DotKind.NEG, w)
+                    addDot(DotKind.NEG, w)?.let { d ->
+                        kind = Kind.DOT
+                        dotId = d.id
+                    }
                 }
             Tool.BRUSH -> {
                 kind = Kind.BRUSH
@@ -854,7 +888,7 @@ private class Gestures(
                 val mesh = state.mesh
                 val nv = if (mesh != null && mesh.size >= 3) MeshMath.nearestVertex(mesh, w) else null
                 val vDist = nv?.dist ?: Float.MAX_VALUE
-                val vHit = vDist <= HIT_PX / state.cam.scale
+                val vHit = vDist <= hitPx / state.cam.scale
                 val eDist = mesh?.let { MeshMath.edgeDistance(it, w) } ?: Float.MAX_VALUE
                 if (nv != null && nv.index >= 0 && vHit && vDist <= eDist + VERTEX_EPS) {
                     kind = Kind.VERTEX
@@ -870,7 +904,7 @@ private class Gestures(
                     return
                 }
                 val nearEdge = mesh != null && mesh.size >= 3 &&
-                    eDist <= EDGE_SNAP_PX / state.cam.scale && eDist < vDist
+                    eDist <= edgeSnapPx / state.cam.scale && eDist < vDist
                 kind = Kind.PAN
                 startTx = state.cam.tx
                 startTy = state.cam.ty
@@ -888,7 +922,13 @@ private class Gestures(
         val a = points[0]
         val b = points[1]
         val mid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
-        pinchStartDist = hypot(a.x - b.x, a.y - b.y).coerceAtLeast(1f)
+        val dist = hypot(a.x - b.x, a.y - b.y)
+        if (dist < 24f * densityPx) {
+            // stylus/palm landing in one spot — treat as a pan, not a zoom
+            helpRestartPan(mid)
+            return
+        }
+        pinchStartDist = dist
         pinchStartScale = state.cam.scale
         pinchWorldMid = toWorld(mid)
         kind = Kind.PINCH
@@ -915,7 +955,7 @@ private class Gestures(
     private fun moveGesture(pos: Offset, change: Offset) {
         when (kind) {
             Kind.PAN -> {
-                if (!moved && hypot(pos.x - pressStage.x, pos.y - pressStage.y) > SLOP_PX) moved = true
+                if (!moved && hypot(pos.x - pressStage.x, pos.y - pressStage.y) > slopPx) moved = true
                 if (moved) {
                     userTouched = true
                     applyCam(
@@ -925,7 +965,7 @@ private class Gestures(
             }
             Kind.VERTEX -> {
                 val w = toWorld(pos)
-                if (!moved && hypot(w.x - pressWorld.x, w.y - pressWorld.y) * state.cam.scale > SLOP_PX) {
+                if (!moved && hypot(w.x - pressWorld.x, w.y - pressWorld.y) * state.cam.scale > slopPx) {
                     moved = true
                 }
                 pressWorld = w
@@ -933,7 +973,7 @@ private class Gestures(
             }
             Kind.DOT -> {
                 val w = toWorld(pos)
-                if (!moved && hypot(w.x - pressWorld.x, w.y - pressWorld.y) * state.cam.scale > SLOP_PX) moved = true
+                if (!moved && hypot(w.x - pressWorld.x, w.y - pressWorld.y) * state.cam.scale > slopPx) moved = true
                 pressWorld = w
                 state.live = Live.DotLive(dotId ?: "", w)
             }

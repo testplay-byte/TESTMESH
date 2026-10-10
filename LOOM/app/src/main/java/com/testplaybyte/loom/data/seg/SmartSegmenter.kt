@@ -58,6 +58,10 @@ class SmartSegmenter(context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val requestSeq = AtomicInteger(0)
 
+    /** Monotonic "latest request wins" token — superseded queued jobs
+     *  bail BEFORE burning 1-3s of CPU on the JNI call. */
+    @Volatile private var latestGen = 0
+
     @Volatile private var segmenter: InteractiveSegmenter? = null
     @Volatile private var initError: String? = null
 
@@ -76,8 +80,12 @@ class SmartSegmenter(context: Context) {
         onError: (requestId: Int, message: String) -> Unit,
     ): Int {
         val id = requestSeq.incrementAndGet()
+        val gen = ++latestGen
         if (strokes.isEmpty()) return id
         executor.execute {
+            // a newer request arrived while this one was queued — skip so
+            // latency never compounds (rapid edits stay responsive)
+            if (gen != latestGen) return@execute
             try {
                 val seg = ensureSegmenter()
                     ?: throw IllegalStateException(initError ?: "Segmentation model unavailable")
@@ -161,6 +169,6 @@ class SmartSegmenter(context: Context) {
             segmenter = null
             setImageFor = null
         }
-        executor.shutdown()
+        executor.shutdownNow()
     }
 }

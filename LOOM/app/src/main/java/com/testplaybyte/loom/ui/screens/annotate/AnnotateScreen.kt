@@ -1,8 +1,10 @@
 package com.testplaybyte.loom.ui.screens.annotate
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +30,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,6 +40,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateInt
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -45,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -108,6 +117,8 @@ import com.testplaybyte.loom.ui.theme.loomType
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -160,10 +171,12 @@ fun AnnotateScreen(
         if (!hintShownEver) {
             delay(400)
             // only burn the once-ever flag when the canvas can actually
-            // show the card (no annotation content yet)
+            // show the card; the card stays until the user acts (max 10s)
             if (!state.present.hasContent) {
                 hintVisible = true
-                delay(2000)
+                withTimeoutOrNull(10000) {
+                    snapshotFlow { state.present.hasContent }.first { it }
+                }
                 hintVisible = false
             }
             vm.repository.markHintShown()
@@ -176,6 +189,17 @@ fun AnnotateScreen(
         }
     }
 
+    // Last Magic Touch failure (drives the recovery card) + elapsed secs
+    var segFailed by remember { mutableStateOf(false) }
+    var sculptSecs by remember { mutableIntStateOf(0) }
+    LaunchedEffect(state.sculpting) {
+        sculptSecs = 0
+        while (state.sculpting) {
+            delay(1000)
+            sculptSecs++
+        }
+    }
+
     // Sheets / transient UI
     var helpOpen by remember { mutableStateOf(false) }
     var clearOpen by remember { mutableStateOf(false) }
@@ -185,6 +209,7 @@ fun AnnotateScreen(
 
     // Real photo decode (demo scenes draw their vector art instead).
     val photo: ImageBitmap? by produceState<ImageBitmap?>(null, image.id) {
+        value = null // never render the previous image's bitmap under new prompts
         value = if (image.sceneId != null) null else withContext(Dispatchers.IO) {
             ImageStore.load(
                 vm.repository.currentWorkspace(), project.slug, image.file,
@@ -296,6 +321,10 @@ fun AnnotateScreen(
             }
             val layout = PhotoLayout.of(bmp.width, bmp.height)
             val sigAtRequest = promptSig
+            // FULL state at request time — the delivery guard compares the
+            // whole ImageState so mesh/density/objects edits made during the
+            // 1-3s processing window can never be overwritten
+            val presentAtRequest = state.present
             segSig[0] = sigAtRequest
             val specs = buildSegSpecs(state.present, layout)
             segRequest = segmenter.segment(
@@ -303,10 +332,11 @@ fun AnnotateScreen(
                 specs,
                 { requestId, mask, w, h ->
                     // Stale guards: superseded request, switched image, or
-                    // prompts changed meanwhile (undo/clear/new edit) — drop.
+                    // ANY state change meanwhile (undo/clear/remove-mesh/
+                    // vertex edit/new prompts) — drop.
                     if (requestId != segRequest) return@segment
                     if (loadedImageId != image.id) return@segment
-                    if (segSig[0] != sigAtRequest || sigOf(state.present) != sigAtRequest) return@segment
+                    if (segSig[0] != sigAtRequest || state.present != presentAtRequest) return@segment
                     scope.launch {
                         // Mask tracing is heavy — keep it off the main thread.
                         // Trace DENSE (epsilon≈0) and let the adaptive fitter
@@ -314,13 +344,14 @@ fun AnnotateScreen(
                         val denseImg = withContext(Dispatchers.Default) {
                             MaskToPolygon.trace(mask, w, h, epsilon = 0.05f)
                         }
-                        // re-verify after the trace window: a Save object /
-                        // reopen click may have landed while we traced
-                        if (loadedImageId != image.id || sigOf(state.present) != sigAtRequest) {
+                        // re-verify after the trace window: any click may
+                        // have landed while we traced
+                        if (loadedImageId != image.id || state.present != presentAtRequest) {
                             return@launch
                         }
                         if (denseImg.isEmpty()) {
                             state.sculpting = false
+                            segFailed = true
                             vm.toast("No object found — put a + dot on it", ToastIcon.WARN)
                             return@launch
                         }
@@ -339,17 +370,28 @@ fun AnnotateScreen(
                         }
                         state.meshGen++
                         state.sculpting = false
+                        segFailed = false
+                        // consuming the brush strokes changed promptSig —
+                        // sync it so the mesh is NOT re-segmented 600ms later
+                        lastSig[0] = sigOf(state.present)
                         pulseNow()
                     }
                 },
                 { requestId, message ->
                     if (requestId != segRequest || loadedImageId != image.id) return@segment
-                    if (segSig[0] != sigAtRequest || sigOf(state.present) != sigAtRequest) return@segment
+                    if (segSig[0] != sigAtRequest || state.present != presentAtRequest) return@segment
                     state.sculpting = false
-                    vm.toast("Smart mask failed: $message", ToastIcon.WARN)
+                    segFailed = true
+                    android.util.Log.w("LoomSeg", "segmentation failed: $message")
+                    vm.toast("Magic Touch couldn\u2019t run — try again", ToastIcon.WARN)
                 },
             )
         }
+    }
+
+    // A rebuilt mesh (sculpt/segment/remesh) invalidates vertex indices.
+    LaunchedEffect(state.meshGen) {
+        if (state.meshGen > 0) state.selection = null
     }
 
     // ── exit flush ───────────────────────────────────────────────────────
@@ -359,6 +401,7 @@ fun AnnotateScreen(
             onExit()
         }
     }
+    BackHandler { flushAndExit() }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // ── top bar ──────────────────────────────────────────────────────
@@ -371,11 +414,24 @@ fun AnnotateScreen(
         ) {
             LoomIconButton(IconChevronLeft, "Back to project", { flushAndExit() }, iconSize = 20.dp)
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "${fmt2(index + 1)} / ${fmt2(project.images.size)}",
-                    style = loomType.monoCounter,
-                    color = c.text,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "${fmt2(index + 1)} / ${fmt2(project.images.size)}",
+                        style = loomType.monoCounter,
+                        color = c.text,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    val st = project.stateOf(image.id).status
+                    Text(
+                        text = st.wire,
+                        style = loomType.monoChip.copy(fontSize = 10.sp),
+                        color = when (st) {
+                            ImageStatus.DONE -> c.pos
+                            ImageStatus.DRAFT -> c.primary
+                            ImageStatus.UNLABELED -> c.textMuted
+                        },
+                    )
+                }
                 Text(
                     text = "${scene?.title ?: image.file} · ${scene?.target?.name ?: targetName(project, image.id)}",
                     style = loomType.small.copy(fontSize = 11.sp),
@@ -441,7 +497,7 @@ fun AnnotateScreen(
             ToolButton(Tool.PAN, IconPan, "Pan canvas", state, Modifier.weight(1f))
             ToolButton(Tool.DOT_POS, IconDotPlus, "Add positive dots", state, Modifier.weight(1f))
             ToolButton(Tool.DOT_NEG, IconDotMinus, "Add negative dots", state, Modifier.weight(1f))
-            ToolButton(Tool.BRUSH, IconBrush, "Exclusion brush", state, Modifier.weight(1f))
+            ToolButton(Tool.BRUSH, IconBrush, "Object brush", state, Modifier.weight(1f))
             ToolButton(Tool.EDIT, IconNodes, "Edit mesh vertices", state, Modifier.weight(1f))
             ToolButton(Tool.ERASER, IconEraser, "Eraser", state, Modifier.weight(1f))
         }
@@ -474,6 +530,7 @@ fun AnnotateScreen(
                 .fillMaxWidth()
                 .background(c.text.copy(alpha = 0.03f * pulseAlpha.value)),
         ) {
+            key(image.id) {
             CanvasStage(
                 scene = scene,
                 photo = photo,
@@ -483,37 +540,116 @@ fun AnnotateScreen(
                 magnifier = settings.magnifier,
                 showHint = hintVisible,
                 onHintTap = { dismissHint() },
+                onWarn = { msg -> vm.toast(msg, ToastIcon.WARN) },
+                onCanvasFeedback = {
+                    if (settings.haptics) {
+                        haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+                    }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
+            }
 
-            // status pill (top-center): "sculpting…" / "N obj · M pts"
+            // status pill (TOP-CENTER, clear of the corner loupe):
+            // animated "Magic Touch…" with elapsed seconds + cancel while
+            // segmenting; "N obj · M pts" once a mesh exists
             val meshSize = state.mesh?.size ?: 0
             if (state.sculpting || state.mesh != null || state.objects.isNotEmpty()) {
-                val pillText = if (state.sculpting) "sculpting…" else buildString {
-                    if (state.objects.isNotEmpty()) append("${state.objects.size} obj")
-                    if (state.mesh != null) {
-                        if (isNotEmpty()) append(" · ")
-                        append("$meshSize pts")
-                    }
-                }
-                Text(
-                    text = pillText,
-                    style = loomType.monoPill,
-                    color = if (state.sculpting) c.primary else c.text,
+                val dotAnim = rememberInfiniteTransition(label = "pill")
+                val dots by dotAnim.animateInt(
+                    initialValue = 0,
+                    targetValue = 4,
+                    animationSpec = infiniteRepeatable(tween(900, easing = androidx.compose.animation.core.LinearEasing)),
+                    label = "pillDots",
+                )
+                Row(
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(10.dp)
+                        .align(Alignment.TopCenter)
+                        .padding(top = 10.dp)
                         .clip(CircleShape)
                         .background(c.surface1.copy(alpha = 0.9f))
                         .border(1.dp, if (state.sculpting) c.mesh.copy(alpha = 0.55f) else c.hairline, CircleShape)
                         .padding(horizontal = 9.dp, vertical = 6.dp),
-                )
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = if (state.sculpting) {
+                            "Magic Touch" + ".".repeat(dots) + if (sculptSecs >= 2) " ${sculptSecs}s" else ""
+                        } else {
+                            buildString {
+                                if (state.objects.isNotEmpty()) append("${state.objects.size} obj")
+                                if (state.mesh != null) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append("$meshSize pts")
+                                }
+                            }
+                        },
+                        style = loomType.monoPill,
+                        color = if (state.sculpting) c.primary else c.text,
+                    )
+                    if (state.sculpting) {
+                        Spacer(Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clip(CircleShape)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    // semantic cancel: stale guards drop the result
+                                    segRequest++
+                                    state.sculpting = false
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(IconClose, contentDescription = "Cancel", tint = c.textMuted, modifier = Modifier.size(12.dp))
+                        }
+                    }
+                }
             }
 
-            // zoom chip (bottom-right)
+            // Magic Touch failure recovery card (auto-clears on success)
+            if (segFailed) {
+                LaunchedEffect(segFailed) {
+                    delay(8000)
+                    segFailed = false
+                }
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 56.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(c.surface1.copy(alpha = 0.96f))
+                        .border(1.dp, c.hairlineStrong, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(IconAlert, contentDescription = null, tint = c.primary, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Couldn\u2019t find an object — move the + dot onto it, or brush around it.",
+                        style = loomType.small.copy(fontSize = 12.sp),
+                        color = c.text,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Dismiss",
+                        style = loomType.smallStrong,
+                        color = c.primary,
+                        modifier = Modifier.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { segFailed = false },
+                    )
+                }
+            }
+
+            // zoom chip (bottom-START — Save & next owns the bottom-right)
             Row(
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
+                    .align(Alignment.BottomStart)
                     .padding(10.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(c.surface1.copy(alpha = 0.92f))
@@ -543,7 +679,13 @@ fun AnnotateScreen(
                 .border(1.dp, c.hairline),
         ) {
             // object bar — saved objects (tap to re-edit) + the working one
-            if (state.mesh != null || state.objects.isNotEmpty()) {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = state.mesh != null || state.objects.isNotEmpty(),
+                enter = androidx.compose.animation.fadeIn(tween(LoomMotion.DUR_3, easing = LoomMotion.ease)) +
+                    androidx.compose.animation.expandVertically(tween(LoomMotion.DUR_3, easing = LoomMotion.ease)),
+                exit = androidx.compose.animation.fadeOut(tween(LoomMotion.DUR_2, easing = LoomMotion.ease)) +
+                    androidx.compose.animation.shrinkVertically(tween(LoomMotion.DUR_2, easing = LoomMotion.ease)),
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -579,6 +721,13 @@ fun AnnotateScreen(
                             )
                         }
                         LoomIconButton(IconSettings, "Configure object", { objOpen = true }, size = 36.dp, iconSize = 16.dp)
+                    }
+                    if (state.mesh == null && state.objects.isNotEmpty()) {
+                        LoomChip(
+                            label = "＋ Add another object",
+                            icon = IconPlus,
+                            onClick = { state.tool = Tool.DOT_POS },
+                        )
                     }
                 }
             }
@@ -638,6 +787,7 @@ fun AnnotateScreen(
                             state.denseRing = null
                             state.meshGen++
                             state.selection = null
+                            state.tool = Tool.DOT_POS
                             pulseNow()
                             vm.toast("Object saved — add the next one", ToastIcon.CHECK)
                         },
@@ -690,12 +840,12 @@ fun AnnotateScreen(
     // ── sheets ───────────────────────────────────────────────────────────
     LoomSheet(open = helpOpen, onClose = { helpOpen = false }, title = "Canvas guide") {
         GuideRow(IconDotPlus, "Prompt dots & Magic Touch", "+ dots mark what to include, − dots what to avoid. On photos the Magic Touch model turns them into a precise mask; the mesh then hugs the object.")
-        GuideRow(IconMesh, "Auto mesh & density", "The mesh grows itself from your dots — add or remove + dots and it re-sculpts. Density sets its vertex count; remeshing keeps your dots.")
+        GuideRow(IconMesh, "Auto mesh & density", "The mesh rebuilds itself ~1s after each change. Density sets its vertex count — the smart mask picks the optimal count automatically, and the stepper re-fits from the full mask shape.")
         GuideRow(IconSettings, "Object label", "Once a mesh exists the object bar rises in with the object it belongs to — tap the object chip or the gear to edit the mesh: pick its class, tune density, check the vertex count, remove it.")
         GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe parks in the corner. Tap an edge midpoint to add one; select a vertex and use Delete to remove it.")
-        GuideRow(IconBrush, "Brush & eraser", "Paint an exclusion to keep the mesh out of an area. Tap a painted stroke with the eraser to remove it.")
+        GuideRow(IconBrush, "Brush & eraser", "On photos, paint around an object to SELECT it (strokes turn into mask). On scene images the brush excludes an area. The eraser removes strokes.")
         GuideRow(IconTag, "Image tags", "Flag the image itself — Blurry, Occluded, Low light or your own. Tags sit in the top bar, ride with the annotations and export with the dataset.")
-        GuideRow(IconPan, "Gestures", "Pan with one finger, pinch or scroll to zoom 50–500%, double-tap for 2×. Undo and redo live in the top bar.")
+        GuideRow(IconPan, "Gestures", "Pan with one finger, pinch to zoom 50–1000%, double-tap for 2×. Undo and redo live in the top bar.")
     }
 
     LoomSheet(open = clearOpen, onClose = { clearOpen = false }, title = "Clear annotations?") {
@@ -935,14 +1085,19 @@ private fun ToolButton(
 ) {
     val c = loomColors
     val active = state.tool == tool
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.92f else 1f, tween(LoomMotion.DUR_1), label = "toolScale")
     Box(
         modifier = modifier
             .height(44.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
             .background(if (active) c.primary.copy(alpha = 0.14f) else Color.Transparent)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+            .clickable(interactionSource = interaction, indication = null) {
                 state.tool = tool
                 state.selection = null
                 state.live = null
+                state.gestureActive = false // a mid-gesture tool switch must not freeze the engine
             },
         contentAlignment = Alignment.Center,
     ) {
