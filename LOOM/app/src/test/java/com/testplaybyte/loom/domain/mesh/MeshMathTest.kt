@@ -2,6 +2,7 @@ package com.testplaybyte.loom.domain.mesh
 
 import com.testplaybyte.loom.domain.model.Dot
 import com.testplaybyte.loom.domain.model.DotKind
+import com.testplaybyte.loom.domain.model.LoomRules
 import com.testplaybyte.loom.domain.model.Pt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -250,5 +251,32 @@ class MeshMathTest {
         val last = q.segments.last().end
         assertEquals(q.start.x, last.x, 1e-4f)
         assertEquals(q.start.y, last.y, 1e-4f)
+    }    @Test
+    fun `fitRing keeps curvature and thins straight runs`() {
+        // A square with ONE bulge: corners are curvature, edges are runs.
+        val ring = ArrayList<Pt>()
+        val corners = listOf(Pt(100f, 100f), Pt(700f, 100f), Pt(700f, 500f), Pt(100f, 500f))
+        // dense outline: 20 points per edge + a semicircular bulge on top edge
+        for (i in 0 until 20) ring.add(Pt(100f + i * 30f, 100f))
+        for (a in 0 until 24) {
+            val t = Math.PI * a / 23.0
+            ring.add(Pt(400f - 150f * Math.cos(t).toFloat(), 100f - 60f * Math.sin(t).toFloat()))
+        }
+        for (i in 0 until 20) ring.add(Pt(700f, 100f + i * 20f))
+        for (i in 0 until 20) ring.add(Pt(700f - i * 30f, 500f))
+        for (i in 0 until 20) ring.add(Pt(100f, 500f - i * 20f))
+
+        val fitted = MeshMath.fitRing(ring, 24)
+        assertTrue("expected ≤ 24 vertices, got ${fitted.size}", fitted.size <= 24)
+        assertTrue(fitted.size >= 3)
+
+        // the bulge apex must survive: it is the highest point of the shape
+        val minY = fitted.minOf { it.y }
+        assertTrue("bulge apex lost", fitted.any { it.y <= minY + 0.5f && it.y < 95f })
+
+        // auto fit stays inside the documented bounds
+        val (autoRing, count) = MeshMath.autoFitRing(ring, LoomRules.DENSITY_MIN, LoomRules.DENSITY_MAX)
+        assertTrue(count in LoomRules.DENSITY_MIN..LoomRules.DENSITY_MAX)
+        assertTrue(autoRing.size >= 3)
     }
 }

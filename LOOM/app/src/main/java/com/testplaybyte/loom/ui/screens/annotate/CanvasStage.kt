@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -56,7 +57,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -70,6 +70,7 @@ import com.testplaybyte.loom.domain.model.Ids
 import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.Stroke as LoomStroke
 import com.testplaybyte.loom.ui.icons.IconClose
+import com.testplaybyte.loom.ui.icons.IconSparkles
 import com.testplaybyte.loom.ui.icons.IconTrash
 import com.testplaybyte.loom.ui.theme.loomColors
 import com.testplaybyte.loom.ui.theme.loomType
@@ -85,7 +86,7 @@ import kotlinx.coroutines.launch
  * the prototype's `canvas-stage.tsx`.
  *
  * · fixed 800×600 world under a camera {scale, tx, ty}: fit-contain on
- *   open, pinch zoom 50–500% anchored at the gesture midpoint, double-tap
+ *   open, pinch zoom 50–1000% anchored at the gesture midpoint, double-tap
  *   2×/1×, one-finger pan with edge clamping, world-fixed 24-unit grid;
  * · tools: pan · +dot · −dot · exclusion brush · mesh vertex edit (loupe,
  *   edge-insert, long-press delete, nudge arrows) · eraser;
@@ -97,7 +98,7 @@ import kotlinx.coroutines.launch
 private const val WORLD_W = 800f
 private const val WORLD_H = 600f
 private const val MIN_SCALE = 0.5f
-private const val MAX_SCALE = 5f
+private const val MAX_SCALE = 10f
 private const val HIT_PX = 22f          // dots + vertices
 private const val SLOP_PX = 7f          // press → drag
 private const val EDGE_SNAP_PX = 14f    // edge tap → insert vertex
@@ -105,7 +106,6 @@ private const val VERTEX_EPS = 1.5f     // world units
 private const val ERASER_HIT_WORLD = 24f
 private const val LOUPE_PX = 112f
 private const val LOUPE_MAG = 3.2f
-private const val LOUPE_GAP = 72f
 private const val LOUPE_HDL_PX = 2.5f
 private const val LOUPE_DOT_PX = 4.4f
 private const val GRID_CELL = 24f
@@ -122,6 +122,8 @@ fun CanvasStage(
     state: AnnotateState,
     dotSizeWorld: Int,
     magnifier: Boolean,
+    showHint: Boolean = false,
+    onHintTap: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val c = loomColors
@@ -176,6 +178,7 @@ fun CanvasStage(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                .clipToBounds()
                 .pointerInput(state.tool) {
                     gestures.handlePointers(this)
                 },
@@ -187,14 +190,16 @@ fun CanvasStage(
             // ── world transform ─────────────────────────────────────────
             translate(cam.tx, cam.ty) {
                 scale(cam.scale, cam.scale, pivot = Offset.Zero) {
+                    // world grid FIRST (behind the art) and only INSIDE the
+                    // world frame — the image sits on one clean grid, never
+                    // a second one painted over it
+                    drawGrid(c.grid, cam.scale)
                     // art (photo letterboxed, or demo vector art)
                     if (photo != null) {
                         drawPhoto(photo, toneHint)
                     } else if (scene != null) {
                         scene.drawCompose(this)
                     }
-                    // world grid + frame, fixed to the world
-                    drawGrid(c.grid, cam.scale)
                     drawRect(
                         color = c.hairlineStrong,
                         topLeft = Offset(0.5f, 0.5f),
@@ -208,17 +213,16 @@ fun CanvasStage(
                         drawStrokePolyline(brush.pts, c.neg)
                     }
 
+                    // saved objects sit under the working mesh, dimmer
+                    for (obj in state.present.objects) {
+                        if (obj.mesh.size < 3) continue
+                        drawObjectMesh(obj.mesh, c, cam.scale, active = false)
+                    }
+
                     // mesh: soft fill + amber line + marching ants + handles
                     if (liveMesh != null && liveMesh.size >= 3) {
-                        val quads = MeshMath.ringQuads(liveMesh)
-                        if (quads != null) {
-                            val path = Path().apply {
-                                moveTo(quads.start.x, quads.start.y)
-                                for (seg in quads.segments) {
-                                    quadraticBezierTo(seg.control.x, seg.control.y, seg.end.x, seg.end.y)
-                                }
-                                close()
-                            }
+                        val path = polygonPath(liveMesh)
+                        run {
                             drawPath(path, color = c.meshSoft)
                             drawPath(
                                 path, color = c.mesh,
@@ -244,14 +248,14 @@ fun CanvasStage(
                                     val q = liveMesh[(i + 1) % liveMesh.size]
                                     drawCircle(
                                         color = c.canvas,
-                                        radius = 2.6f,
+                                        radius = 2.0f,
                                         center = Offset((p.x + q.x) / 2f, (p.y + q.y) / 2f),
                                     )
                                     drawCircle(
                                         color = c.mesh,
-                                        radius = 2.6f,
+                                        radius = 2.0f,
                                         center = Offset((p.x + q.x) / 2f, (p.y + q.y) / 2f),
-                                        style = Stroke(width = 1.4f),
+                                        style = Stroke(width = 1.2f),
                                     )
                                 }
                                 for (i in liveMesh.indices) {
@@ -259,14 +263,14 @@ fun CanvasStage(
                                     val selected = (state.selection as? Selection.Vertex)?.index == i
                                     drawCircle(
                                         color = Color(0xFFFFFDF6),
-                                        radius = 5f,
+                                        radius = 3.4f,
                                         center = Offset(p.x, p.y),
                                     )
                                     drawCircle(
                                         color = if (selected) c.primary else c.mesh,
-                                        radius = 5f,
+                                        radius = 3.4f,
                                         center = Offset(p.x, p.y),
-                                        style = Stroke(width = if (selected) 3f else 2.4f),
+                                        style = Stroke(width = if (selected) 2.2f else 1.8f),
                                     )
                                 }
                             }
@@ -304,15 +308,37 @@ fun CanvasStage(
             modifier = Modifier.align(Alignment.TopStart).padding(10.dp),
         )
 
-        // ── empty hint ──────────────────────────────────────────────────
-        val hasContent = state.dots.isNotEmpty() || state.mesh != null || state.strokes.isNotEmpty()
-        if (!hasContent) {
-            Column3Hint(modifier = Modifier.align(Alignment.Center))
+        // ── first-run hint: square-ish, 2s, tap-dismiss, once ever ──────
+        val hasContent = state.dots.isNotEmpty() || state.mesh != null ||
+            state.strokes.isNotEmpty() || state.objects.isNotEmpty()
+        if (!hasContent && showHint) {
+            Column3Hint(
+                modifier = Modifier.align(Alignment.Center),
+                onTap = onHintTap,
+            )
         }
     }
 }
 
 // ── drawing helpers ───────────────────────────────────────────────────────
+
+/** The polygon EXACTLY as the points define it — straight edges, no
+ *  smoothing, so the annotation is what you see (and what exports). */
+private fun polygonPath(pts: List<Pt>): Path = Path().apply {
+    moveTo(pts[0].x, pts[0].y)
+    for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+    close()
+}
+
+/** A saved object: dim fill + hairline, no handles. */
+private fun DrawScope.drawObjectMesh(mesh: List<Pt>, c: com.testplaybyte.loom.ui.theme.LoomColors, camScale: Float, active: Boolean) {
+    val path = polygonPath(mesh)
+    drawPath(path, color = c.meshSoft.copy(alpha = if (active) 1f else 0.5f))
+    drawPath(
+        path, color = c.mesh.copy(alpha = if (active) 1f else 0.55f),
+        style = Stroke(width = 1.4f / camScale, join = StrokeJoin.Round),
+    )
+}
 
 private fun DrawScope.drawPhoto(photo: ImageBitmap, toneHint: Int) {
     drawRect(Color(toneHint))
@@ -328,18 +354,20 @@ private fun DrawScope.drawPhoto(photo: ImageBitmap, toneHint: Int) {
     )
 }
 
-/** Drafting grid, world-fixed (24-unit cells) — drawn with the art. */
+/** Drafting grid, world-fixed (24-unit cells), clipped to the world frame. */
 private fun DrawScope.drawGrid(color: Color, camScale: Float) {
     val stroke = 1f / camScale
-    var x = -GRID_CELL * 8
-    while (x <= WORLD_W + GRID_CELL * 8) {
-        drawLine(color, Offset(x, -GRID_CELL * 8), Offset(x, WORLD_H + GRID_CELL * 8), strokeWidth = stroke)
-        x += GRID_CELL
-    }
-    var y = -GRID_CELL * 8
-    while (y <= WORLD_H + GRID_CELL * 8) {
-        drawLine(color, Offset(-GRID_CELL * 8, y), Offset(WORLD_W + GRID_CELL * 8, y), strokeWidth = stroke)
-        y += GRID_CELL
+    clipRect(left = 0f, top = 0f, right = WORLD_W, bottom = WORLD_H) {
+        var x = 0f
+        while (x <= WORLD_W) {
+            drawLine(color, Offset(x, 0f), Offset(x, WORLD_H), strokeWidth = stroke)
+            x += GRID_CELL
+        }
+        var y = 0f
+        while (y <= WORLD_H) {
+            drawLine(color, Offset(0f, y), Offset(WORLD_W, y), strokeWidth = stroke)
+            y += GRID_CELL
+        }
     }
 }
 
@@ -455,20 +483,10 @@ private fun LoupeOverlay(
     } ?: return
     val cam = state.cam
     val half = LOUPE_PX / 2f
-    val sx = pos.x * cam.scale + cam.tx
-    val sy = pos.y * cam.scale + cam.ty
-    // Place the loupe ABOVE the finger by default; when there is no room
-    // (finger near the top edge) flip it BELOW so it never covers the
-    // system bars or leaves the viewport. Horizontally it hugs the finger,
-    // clamped to the canvas edges.
-    val roomAbove = sy - LOUPE_GAP - LOUPE_PX >= 0f
-    val cx = clamp(sx, half, max(half, viewport.width - half))
-    val cy = if (roomAbove) {
-        sy - LOUPE_GAP - half
-    } else {
-        // clamp the loupe's BOTTOM edge inside the viewport
-        clamp(sy + LOUPE_GAP + half, LOUPE_PX + 8f, max(LOUPE_PX + 8f, viewport.height - half - 8f))
-    }
+    // Fixed parking spot in the TOP-RIGHT corner, far from the finger —
+    // the magnifier must never sit under the drag point.
+    val cx = viewport.width - half - 16f
+    val cy = 16f + half
     val lvw = LOUPE_PX / LOUPE_MAG
     val vx = pos.x - lvw / 2f
     val vy = pos.y - lvw / 2f
@@ -484,7 +502,7 @@ private fun LoupeOverlay(
             .size(LOUPE_PX.dp)
             .clip(CircleShape)
             .background(c.canvas)
-            .border(1.dp, c.hairlineStrong, CircleShape),
+            .border(1.5.dp, c.primary.copy(alpha = 0.85f), CircleShape),
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             // magnified art + geometry, centered on the dragged point
@@ -494,38 +512,18 @@ private fun LoupeOverlay(
                     translate(-pos.x, -pos.y) {
                         if (photo != null) drawPhoto(photo, toneHint) else scene?.drawCompose(this)
                         liveMesh?.let { m ->
-                            val quads = MeshMath.ringQuads(m)
-                            if (quads != null) {
-                                val path = Path().apply {
-                                    moveTo(quads.start.x, quads.start.y)
-                                    for (seg in quads.segments) {
-                                        quadraticBezierTo(seg.control.x, seg.control.y, seg.end.x, seg.end.y)
-                                    }
-                                    close()
-                                }
-                                drawPath(path, color = c.meshSoft)
-                                drawPath(path, color = c.mesh, style = Stroke(width = 1f / scaleK))
+                            if (m.size >= 3) {
+                                drawPath(polygonPath(m), color = c.meshSoft)
+                                drawPath(polygonPath(m), color = c.mesh, style = Stroke(width = 1f / scaleK))
                             }
                         }
                     }
                 }
             }
-            // markers in screen px (de-emphasized, per the prototype)
+            // markers in screen px (de-emphasized)
             liveMesh?.let { m ->
                 val toL = { p: Pt -> Offset((p.x - vx) * LOUPE_MAG, (p.y - vy) * LOUPE_MAG) }
-                val path = MeshMath.ringQuads(m)?.let { q ->
-                    Path().apply {
-                        val st = toL(q.start)
-                        moveTo(st.x, st.y)
-                        for (seg in q.segments) {
-                            val ctrl = toL(seg.control)
-                            val end = toL(seg.end)
-                            quadraticBezierTo(ctrl.x, ctrl.y, end.x, end.y)
-                        }
-                        close()
-                    }
-                }
-                path?.let { drawPath(it, color = c.mesh, style = Stroke(width = 1f)) }
+                if (m.size >= 3) drawPath(polygonPath(m.map(toL)), color = c.mesh, style = Stroke(width = 1f))
                 for (p in m) {
                     val o = toL(p)
                     drawCircle(color = Color(0xFFFFFDF6), radius = hdlR, center = o)
@@ -549,16 +547,6 @@ private fun LoupeOverlay(
             )
         }
     }
-    // coordinate readout attached to the loupe's far edge (clamped on-screen)
-    Text(
-        text = "x ${Math.round(pos.x)} · y ${Math.round(pos.y)}",
-        style = loomType.monoSmall.copy(fontWeight = FontWeight.W500),
-        color = c.text,
-        modifier = Modifier
-            .offset { IntOffset(cx.toInt() - 40, min(viewport.height - 22f, cy + half + 6f).toInt()) }
-            .background(c.surface1.copy(alpha = 0.9f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    )
 }
 
 // ── delete chip ───────────────────────────────────────────────────────────
@@ -567,7 +555,9 @@ private fun LoupeOverlay(
 private fun DeleteChip(state: AnnotateState, onDelete: () -> Unit, modifier: Modifier = Modifier) {
     val c = loomColors
     val sel = state.selection ?: return
-    if (state.tool != Tool.EDIT) return
+    // Vertices are edited with the EDIT tool; a selected dot can be
+    // removed from ANY tool (otherwise DOT mode has no way to delete).
+    if (state.tool != Tool.EDIT && sel !is Selection.DotSel) return
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(999.dp))
@@ -859,7 +849,6 @@ private class Gestures(
                     kind = Kind.VERTEX
                     vertexIndex = nv.index
                     state.selection = Selection.Vertex(nv.index)
-                    scheduleLongPress(nv.index)
                     return
                 }
                 val dot = hitDot(w)
@@ -880,23 +869,7 @@ private class Gestures(
         @Suppress("UNUSED_EXPRESSION") type
     }
 
-    private var lpJob: Job? = null
-
-    private fun scheduleLongPress(index: Int) {
-        lpJob?.cancel()
-        lpJob = scope.launch {
-            delay(com.testplaybyte.loom.ui.theme.LoomMotion.VERTEX_LONG_PRESS_MS)
-            if (kind == Kind.VERTEX && vertexIndex == index && !moved) {
-                kind = Kind.NONE
-                state.live = null
-                deleteVertex(index)
-                onLongPressDelete?.invoke()
-            }
-        }
-    }
-
     var onStrokeRemoved: (() -> Unit)? = null
-    var onLongPressDelete: (() -> Unit)? = null
 
     private fun beginPinch(points: List<Offset>) {
         // commit whatever single-finger gesture was in flight
@@ -981,7 +954,6 @@ private class Gestures(
     }
 
     private fun endGesture() {
-        lpJob?.cancel()
         state.gestureActive = false
         when (kind) {
             Kind.PAN -> {

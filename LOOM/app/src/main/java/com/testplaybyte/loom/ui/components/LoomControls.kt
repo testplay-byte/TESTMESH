@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -372,7 +373,7 @@ fun LoomStepper(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        StepperButton(IconMinus, enabled = value > min, description = "Decrease") {
+        StepperHoldButton(IconMinus, enabled = value > min, description = "Decrease") {
             onChange((value - step).coerceIn(min, max))
         }
         Row(
@@ -385,11 +386,52 @@ fun LoomStepper(
                 Text(text = " $suffix", style = loomType.monoSmall, color = c.textMuted, maxLines = 1)
             }
         }
-        StepperButton(IconPlus, enabled = value < max, description = "Increase") {
+        StepperHoldButton(IconPlus, enabled = value < max, description = "Increase") {
             onChange((value + step).coerceIn(min, max))
         }
     }
 }
+
+/**
+ * Stepper button with press-and-hold acceleration: the step fires on
+ * PRESS; holding past 380ms starts an auto-repeat whose interval shrinks
+ * every tick (250ms → 60ms floor, ×0.88) so walking 10→200 takes seconds.
+ * Release cancels. The repeat reads the LATEST value/onChange through
+ * [onStep] each tick (the caller's lambda closes over the composition).
+ */
+@Composable
+private fun StepperHoldButton(
+    icon: ImageVector,
+    enabled: Boolean,
+    description: String,
+    onStep: () -> Unit,
+) {
+    val c = loomColors
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    LaunchedEffect(pressed, enabled) {
+        if (!pressed || !enabled) return@LaunchedEffect
+        onStep()
+        var interval = 250f
+        delay(380)
+        while (true) {
+            onStep()
+            delay(interval.toLong())
+            interval = (interval * 0.88f).coerceAtLeast(60f)
+        }
+    }
+    Box(
+        modifier = Modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .background(c.surface2)
+            .border(1.dp, c.hairlineStrong, CircleShape)
+            .alpha(if (enabled) 1f else 0.35f)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = {}),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = description, tint = c.text, modifier = Modifier.size(15.dp))
+    }
 
 @Composable
 private fun StepperButton(

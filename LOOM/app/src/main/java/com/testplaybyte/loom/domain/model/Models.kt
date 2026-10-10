@@ -31,22 +31,42 @@ enum class ImageStatus(val wire: String) {
 }
 
 /**
+ * One FINISHED annotation object on an image — a named, editable polygon
+ * (world space). The working mesh ([ImageState.mesh]) becomes an ObjAnn
+ * via "Save object"; several ObjAnns per image are the multi-object model.
+ */
+data class ObjAnn(
+    val id: String,
+    val labelId: String?,
+    val mesh: List<Pt>,
+    /** Vertex count the object was fitted with (informational). */
+    val density: Int = 16,
+)
+
+/**
  * Per-image annotation state — the unit of undo/redo AND persistence
  * (docs/05 §1 `ImageState`).
  */
 data class ImageState(
     val dots: List<Dot> = emptyList(),
-    /** Closed polygon; null until the model has sculpted a mesh. */
+    /** Working (in-progress) closed polygon; null until sculpted. */
     val mesh: List<Pt>? = null,
+    /** Saved objects — an image can hold any number of them. */
+    val objects: List<ObjAnn> = emptyList(),
     val strokes: List<Stroke> = emptyList(),
-    /** Target vertex count (6–40; canvas default from settings). */
+    /** Target vertex count (3–200; auto-chosen by the smart mask). */
     val density: Int = 16,
-    /** Class label of the mesh's object (null until named). */
+    /** Class label of the WORKING mesh's object (null until named). */
     val labelId: String? = null,
     /** Quality flags (max 8). */
     val tags: List<String> = emptyList(),
     val status: ImageStatus = ImageStatus.UNLABELED,
 ) {
+    /** True when any annotation content exists (drives persistence). */
+    val hasContent: Boolean
+        get() = mesh != null || objects.isNotEmpty() || dots.isNotEmpty() ||
+            strokes.isNotEmpty() || tags.isNotEmpty() || status != ImageStatus.UNLABELED
+
     companion object {
         fun empty(density: Int): ImageState = ImageState(density = density)
     }
@@ -187,8 +207,8 @@ object LoomRules {
     const val TAG_MAX = 8
     const val TAG_NAME_MAX = 18
     const val SLUG_MAX = 24
-    const val DENSITY_MIN = 6
-    const val DENSITY_MAX = 40
+    const val DENSITY_MIN = 3
+    const val DENSITY_MAX = 200
     const val DEFAULT_DENSITY_MIN = 8
     const val DEFAULT_DENSITY_MAX = 36
     const val UNDO_MIN = 10

@@ -62,6 +62,13 @@ class AnnotateState(undoDepth: Int) {
     /** Live density while the stepper is being dragged (remesh preview). */
     var densityDraft by mutableStateOf<Int?>(null)
 
+    /**
+     * The dense mask contour of the LAST segmentation (transient, not
+     * persisted) — density changes re-fit from it so raising the vertex
+     * count can add detail back on curves.
+     */
+    var denseRing by mutableStateOf<List<Pt>?>(null)
+
     /** True while a canvas gesture is live (defers the sculpt commit). */
     var gestureActive by mutableStateOf(false)
 
@@ -98,6 +105,7 @@ class AnnotateState(undoDepth: Int) {
         selection = null
         densityDraft = null
         sculpting = false
+        denseRing = null
     }
 
     /** One completed gesture = one undo unit. */
@@ -119,6 +127,7 @@ class AnnotateState(undoDepth: Int) {
     // ── convenience read views ────────────────────────────────────────────
 
     val dots: List<Dot> get() = present.dots
+    val objects: List<com.testplaybyte.loom.domain.model.ObjAnn> get() = present.objects
     val mesh: List<Pt>? get() = present.mesh
     val strokes: List<com.testplaybyte.loom.domain.model.Stroke> get() = present.strokes
 

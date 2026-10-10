@@ -113,6 +113,59 @@ object MeshMath {
     }
 
     /**
+     * Curvature-ADAPTIVE reduction of a dense ring to at most [target]
+     * vertices: Ramer–Douglas–Peucker keeps vertices where the boundary
+     * curves (fingertips, corners) and drops them along straight runs —
+     * unlike [resampleRing]'s uniform arc-length spacing. The RDP epsilon
+     * is found by binary search on the vertex count.
+     */
+    fun fitRing(dense: List<Pt>, target: Int): List<Pt> {
+        if (dense.size <= max(3, target)) return dense
+        var lo = 0.01f
+        var hi = perimeter(dense) / 3f
+        var best: List<Pt> = dense
+        for (i in 0 until 26) {
+            val mid = (lo + hi) / 2f
+            val simplified = com.testplaybyte.loom.domain.seg.MaskToPolygon.rdpClosed(dense, mid)
+            if (simplified.size < 3) { lo = mid; continue }
+            if (simplified.size > target) {
+                lo = mid
+            } else {
+                best = simplified
+                hi = mid
+            }
+            if (hi - lo < 0.05f) break
+        }
+        return if (best.size in 3..target) best else dense
+    }
+
+    /**
+     * The "optimal minimal" vertex set for a mask shape: RDP with an
+     * epsilon proportional to the shape's extent — dense on curves, bare
+     * minimum on straight runs. Returns the ring AND its count (the new
+     * auto density), clamped to the documented density range.
+     */
+    fun autoFitRing(dense: List<Pt>, minV: Int, maxV: Int): Pair<List<Pt>, Int> {
+        if (dense.size < 3) return dense to dense.size.coerceAtLeast(0)
+        val bb = bbox(dense)
+        val eps = 0.006f * max(bb.w, bb.h)
+        val fitted = com.testplaybyte.loom.domain.seg.MaskToPolygon.rdpClosed(dense, eps)
+        val ring = if (fitted.size in 3..maxV) fitted else fitRing(dense, maxV)
+        val count = ring.size.coerceIn(minV, maxV)
+        return ring to count
+    }
+
+    private fun perimeter(pts: List<Pt>): Float {
+        var sum = 0f
+        for (i in pts.indices) {
+            val a = pts[i]
+            val b = pts[(i + 1) % pts.size]
+            sum += hypot(b.x - a.x, b.y - a.y)
+        }
+        return sum.coerceAtLeast(1f)
+    }
+
+    /**
      * Sculpt the ring with the user's prompt dots — `applyDotInfluence`.
      * Positive dots pull nearby vertices toward themselves, negative dots
      * push them away; gaussian falloff, exact constants above.

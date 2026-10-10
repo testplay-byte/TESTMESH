@@ -45,6 +45,9 @@ class SmartSegmenter(context: Context) {
 
         /** Confidence threshold (matches google-ai-edge/gallery). */
         const val CONFIDENCE_THRESHOLD = 0.5f
+
+        /** Retry threshold when 0.5 finds almost nothing. */
+        const val FALLBACK_THRESHOLD = 0.3f
     }
 
     /** One scribble: image-pixel points + polarity. */
@@ -104,7 +107,15 @@ class SmartSegmenter(context: Context) {
                 buffer.order(ByteOrder.nativeOrder())
                 val floats = FloatArray(image.width * image.height)
                 buffer.asFloatBuffer().get(floats)
-                val mask = BooleanArray(floats.size) { i -> floats[i] > CONFIDENCE_THRESHOLD }
+                var mask = BooleanArray(floats.size) { i -> floats[i] > CONFIDENCE_THRESHOLD }
+                // Fallback pass from the SAME confidence map: when the
+                // 0.5 threshold finds almost nothing, retry at 0.3 before
+                // giving up (faint/low-contrast objects).
+                val hits = mask.count { it }
+                if (hits < floats.size * 0.005) {
+                    val loose = BooleanArray(floats.size) { i -> floats[i] > FALLBACK_THRESHOLD }
+                    if (loose.count { it } > hits) mask = loose
+                }
                 mainHandler.post {
                     onResult(id, mask, image.width, image.height)
                 }

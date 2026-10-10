@@ -345,7 +345,11 @@ fun LoomEmptyAction(
  * nav/dock.
  */
 @Composable
-fun LoomToastHost(toast: ToastMsg?, bottomPadding: androidx.compose.ui.unit.Dp = 96.dp) {
+fun LoomToastHost(
+    toast: ToastMsg?,
+    bottomPadding: androidx.compose.ui.unit.Dp = 96.dp,
+    onDismiss: () -> Unit = {},
+) {
     val c = loomColors
     // Keep the last message while the exit animation runs.
     val shown = remember { androidx.compose.runtime.mutableStateOf<ToastMsg?>(null) }
@@ -365,6 +369,11 @@ fun LoomToastHost(toast: ToastMsg?, bottomPadding: androidx.compose.ui.unit.Dp =
                     .clip(CircleShape)
                     .background(c.surface4)
                     .border(1.dp, c.hairlineStrong, CircleShape)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss,
+                    )
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
@@ -392,7 +401,7 @@ fun LoomToastHost(toast: ToastMsg?, bottomPadding: androidx.compose.ui.unit.Dp =
 
 // ── FAB ───────────────────────────────────────────────────────────────────
 
-/** `lm-fab`: 56dp amber circle with a 24dp plus, spring pop on press. */
+/** `lm-fab`: 56dp amber rounded-square (radius 16) with a 24dp plus, spring pop on press. */
 @Composable
 fun LoomFab(
     onClick: () -> Unit,
@@ -411,7 +420,7 @@ fun LoomFab(
         modifier = modifier
             .scale(scale)
             .size(56.dp)
-            .clip(CircleShape)
+            .clip(RoundedCornerShape(16.dp))
             .background(c.primary)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,

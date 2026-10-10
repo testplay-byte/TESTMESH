@@ -66,7 +66,7 @@ private fun LoomAppShell(vm: LoomViewModel) {
     ) {
         LoomNavHost(navController = navController, vm = vm)
         // The toast overlays everything (z-top, docs/02 §6).
-        LoomToastHost(toast = toast, bottomPadding = 96.dpToast())
+        LoomToastHost(toast = toast, bottomPadding = 96.dpToast(), onDismiss = { vm.dismissToast() })
     }
 }
 

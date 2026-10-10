@@ -1,10 +1,5 @@
 package com.testplaybyte.loom.ui.screens.newproject
 
-import android.content.Intent
-import android.net.Uri
-import android.provider.DocumentsContract
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +13,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -41,7 +37,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -60,28 +55,23 @@ import com.testplaybyte.loom.ui.components.LoomPathPill
 import com.testplaybyte.loom.ui.components.LoomScreenHeader
 import com.testplaybyte.loom.ui.components.LoomSheet
 import com.testplaybyte.loom.ui.components.SectionLabel
-import com.testplaybyte.loom.ui.icons.IconCheck
-import com.testplaybyte.loom.ui.icons.IconChevronRight
-import com.testplaybyte.loom.ui.icons.IconFolder
 import com.testplaybyte.loom.ui.theme.loomColors
 import com.testplaybyte.loom.ui.theme.loomType
 import kotlinx.coroutines.launch
 
 /**
- * §4 New project — a 3-step creation form on one scrollable screen
- * (docs/03 §4, trimmed for the real app): Name (32 chars + live slug
- * preview) → Location (folder picker sheet: workspace root, existing
- * subfolders, create-new-folder, plus a real SAF change-storage action)
- * → Labels (chips, max 8, seed "Object").
+ * §4 New project — two steps, one scrollable screen: Name (32 chars +
+ * live slug preview showing exactly where the folder will land) and
+ * Labels (chips, max 8, seed "Object").
  *
- * The project starts EMPTY — real images are added afterwards from the
- * project screen (photo picker) or by dropping files into the project
- * folder, where the rescan picks them up. There is deliberately no
- * image/scene picking here.
+ * There is deliberately NO location picker and NO image picking: the
+ * folder is always the user's storage folder + the slugified name, and
+ * the project starts EMPTY — images are added afterwards from the
+ * project screen or by dropping files into the folder.
  *
- * Create is always live: with a blank name it asks for one instead of
- * sitting in a washed-out disabled state. → toast `Project created` →
- * the new project's detail screen.
+ * Create is always fully opaque (never a washed-out disabled state);
+ * with a blank name it asks for one via toast. `imePadding` keeps the
+ * button above the keyboard while typing.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -91,64 +81,25 @@ fun NewProjectScreen(
     onCreated: (String) -> Unit,
 ) {
     val c = loomColors
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val workspacePath by vm.workspacePath.collectAsState()
-    val perms by vm.perms.collectAsState()
 
     var name by remember { mutableStateOf("") }
-    var parentFolder by remember { mutableStateOf("") } // "" = workspace root
     val labels = remember { mutableStateListOf("Object") }
-    val subfolders = remember { mutableStateListOf<String>() }
 
-    var locationSheet by remember { mutableStateOf(false) }
     var labelSheet by remember { mutableStateOf(false) }
-    var newFolderDraft by remember { mutableStateOf("") }
     var labelDraft by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        subfolders.clear()
-        subfolders.addAll(vm.repository.workspaceSubfolders())
-    }
-
-    // Real SAF picker for changing the storage folder from the Location sheet.
-    val folderLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree(),
-    ) { uri: Uri? ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                )
-            } catch (e: SecurityException) {
-                // non-persistable provider: continues for this session
-            }
-            scope.launch {
-                val display = try {
-                    DocumentsContract.getTreeDocumentId(uri).substringAfterLast(':').substringAfterLast('/')
-                } catch (e: Exception) {
-                    uri.lastPathSegment ?: "LoomDatasets"
-                }
-                vm.repository.setFolder(uri.toString(), display.ifEmpty { "LoomDatasets" })
-                subfolders.clear()
-                subfolders.addAll(vm.repository.workspaceSubfolders())
-                parentFolder = ""
-                vm.toast("Permission granted", ToastIcon.CHECK)
-            }
-        }
-    }
-
     val slug = LoomRules.slugify(name.ifEmpty { "dataset" })
-    val folderPath = buildString {
-        append(workspacePath.ifEmpty { "LoomDatasets" })
-        if (parentFolder.isNotEmpty()) append("/").append(parentFolder)
-        append("/").append(slug)
-    }
-    val canCreate = name.isNotBlank() && !busy
+    val folderPath = "${workspacePath.ifEmpty { "LoomDatasets" }}/$slug"
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            // keep the Create button above the keyboard while typing
+            .imePadding(),
+    ) {
         LoomScreenHeader(title = "New project", onBack = onBack)
         Column(
             modifier = Modifier
@@ -176,34 +127,9 @@ fun NewProjectScreen(
             )
             LoomPathPill(path = folderPath, modifier = Modifier.fillMaxWidth())
 
-            // ── 2. Location ─────────────────────────────────────────────────
+            // ── 2. Labels ───────────────────────────────────────────────────
             Spacer(Modifier.height(8.dp))
-            SectionLabel("2. Location")
-            LoomCard(
-                onClick = {
-                    newFolderDraft = ""
-                    locationSheet = true
-                },
-                contentPadding = PaddingValues(14.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(IconFolder, contentDescription = null, tint = c.textMuted, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (parentFolder.isEmpty()) "Workspace root" else parentFolder,
-                            style = loomType.title,
-                            color = c.text,
-                        )
-                        Text("Tap to choose a folder", style = loomType.small, color = c.textMuted)
-                    }
-                    Icon(IconChevronRight, contentDescription = null, tint = c.textMuted, modifier = Modifier.size(18.dp))
-                }
-            }
-
-            // ── 3. Labels ───────────────────────────────────────────────────
-            Spacer(Modifier.height(8.dp))
-            SectionLabel("3. Labels")
+            SectionLabel("2. Labels")
             LoomCard(contentPadding = PaddingValues(14.dp)) {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -243,7 +169,6 @@ fun NewProjectScreen(
                             // project screen or dropped into the folder.
                             sceneIds = emptyList(),
                             labelNames = labels.take(LoomRules.LABEL_MAX).toList(),
-                            parentFolder = parentFolder.ifEmpty { null },
                         )
                         busy = false
                         vm.toast("Project created — add images next", ToastIcon.CHECK)
@@ -251,73 +176,16 @@ fun NewProjectScreen(
                     }
                 },
                 fullWidth = true,
-                enabled = canCreate,
+                enabled = !busy,
                 label = "Create project",
             )
             Text(
-                text = if (perms.files) {
-                    "Loom writes images and annotations.json into the project folder as you work."
-                } else {
-                    "Loom will request file access before writing."
-                },
+                text = "A folder named \u201C$slug\u201D is created in your storage folder. " +
+                    "Each image gets its own LabelMe .json beside it as you annotate.",
                 style = loomType.small,
                 color = c.textMuted,
             )
             Spacer(Modifier.height(8.dp))
-        }
-    }
-
-    // ── Location sheet ────────────────────────────────────────────────────
-    LoomSheet(open = locationSheet, onClose = { locationSheet = false }, title = "Choose folder") {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            FolderOption(
-                path = workspacePath.ifEmpty { "LoomDatasets" },
-                selected = parentFolder.isEmpty(),
-            ) {
-                parentFolder = ""
-                locationSheet = false
-            }
-            subfolders.forEach { sub ->
-                FolderOption(
-                    path = "${workspacePath.ifEmpty { "LoomDatasets" }}/$sub",
-                    selected = parentFolder == sub,
-                ) {
-                    parentFolder = sub
-                    locationSheet = false
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            LoomInput(
-                value = newFolderDraft,
-                onValueChange = { newFolderDraft = it },
-                placeholder = "folder-name",
-                maxLength = LoomRules.SLUG_MAX,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LoomButton(
-                    onClick = {
-                        if (newFolderDraft.isBlank()) return@LoomButton
-                        val sub = LoomRules.slugify(newFolderDraft)
-                        scope.launch {
-                            vm.repository.createWorkspaceSubfolder(sub)
-                            subfolders.clear()
-                            subfolders.addAll(vm.repository.workspaceSubfolders())
-                            parentFolder = sub
-                            locationSheet = false
-                        }
-                    },
-                    size = LoomButtonSize.SM,
-                    label = "Create",
-                )
-                LoomButton(
-                    onClick = { folderLauncher.launch(null) },
-                    size = LoomButtonSize.SM,
-                    variant = LoomButtonVariant.TONAL,
-                    label = "Change storage folder…",
-                )
-            }
         }
     }
 
@@ -349,35 +217,5 @@ fun NewProjectScreen(
         )
         Spacer(Modifier.height(8.dp))
         Text("Up to 8 classes per project.", style = loomType.small, color = c.textMuted)
-    }
-}
-
-/** Base-dir row: mono path + mint check when selected. */
-@Composable
-private fun FolderOption(path: String, selected: Boolean, onClick: () -> Unit) {
-    val c = loomColors
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .padding(horizontal = 8.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = path,
-            style = loomType.monoSmall,
-            color = c.text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        if (selected) {
-            Icon(IconCheck, contentDescription = null, tint = c.pos, modifier = Modifier.size(16.dp))
-        }
     }
 }

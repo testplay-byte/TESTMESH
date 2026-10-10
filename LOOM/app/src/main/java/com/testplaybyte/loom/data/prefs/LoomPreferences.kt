@@ -38,6 +38,7 @@ class LoomPreferences(private val context: Context) {
         val PERMS = stringPreferencesKey("perms-json")
         val WORKSPACE_URI = stringPreferencesKey("workspace-tree-uri")
         val SEED_DONE = booleanPreferencesKey("seed-done")
+        val HINT_SHOWN = booleanPreferencesKey("canvas-hint-shown")
         val DISMISSED = stringSetPreferencesKey("dismissed-folders")
     }
 
@@ -83,6 +84,13 @@ class LoomPreferences(private val context: Context) {
 
     suspend fun setSeedDone() {
         context.dataStore.edit { it[Keys.SEED_DONE] = true }
+    }
+
+    // ── canvas hint (first-run only) ─────────────────────────────────────
+    val hintShown: Flow<Boolean> = context.dataStore.data.map { it[Keys.HINT_SHOWN] ?: false }
+
+    suspend fun setHintShown() {
+        context.dataStore.edit { it[Keys.HINT_SHOWN] = true }
     }
 
     val dismissedFolders: Flow<Set<String>> = context.dataStore.data.map { it[Keys.DISMISSED] ?: emptySet() }

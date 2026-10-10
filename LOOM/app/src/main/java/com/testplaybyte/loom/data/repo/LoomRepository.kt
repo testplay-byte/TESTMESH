@@ -11,6 +11,7 @@ import com.testplaybyte.loom.data.workspace.SafWorkspace
 import com.testplaybyte.loom.data.workspace.Workspace
 import com.testplaybyte.loom.data.workspace.WsNames
 import com.testplaybyte.loom.domain.export.DatasetWriters
+import com.testplaybyte.loom.domain.export.LabelMeCodec
 import com.testplaybyte.loom.domain.export.LoomJsonCodec
 import com.testplaybyte.loom.domain.export.ProjectMetaCodec
 import com.testplaybyte.loom.domain.model.ExportFormat
@@ -29,6 +30,7 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -146,6 +148,11 @@ class LoomRepository(
     }
 
     // ── permissions / folder ──────────────────────────────────────────────
+
+    /** First-run canvas hint (shows once, ever). */
+    val hintShown: Flow<Boolean> = prefs.hintShown
+
+    suspend fun markHintShown() = prefs.setHintShown()
 
     suspend fun grantPerm(key: String) = withContext(io) {
         val next = when (key) {
@@ -372,20 +379,57 @@ class LoomRepository(
      * Applies the status-upgrade rule: a committed edit on an unlabeled
      * image becomes a draft (docs/05 §4).
      */
-    suspend fun saveImageState(projectId: String, imageId: String, state: ImageState) = withContext(io) {
+    suspend fun saveImageState(
+        projectId: String,
+        imageId: String,
+        state: ImageState,
+        /** true on explicit saves → embed the image bytes base64 in the LabelMe file. */
+        embedImage: Boolean = false,
+    ) = withContext(io) {
         mutex.withLock {
             val p = projectById(projectId) ?: return@withLock
             var st = state
             if (st.status == ImageStatus.UNLABELED &&
-                (st.mesh != null || st.dots.isNotEmpty() || st.strokes.isNotEmpty())
+                (st.mesh != null || st.objects.isNotEmpty() || st.dots.isNotEmpty() || st.strokes.isNotEmpty())
             ) {
                 st = st.copy(status = ImageStatus.DRAFT)
             }
             if (p.states[imageId] == st) return@withLock
             val next = touch(p.copy(states = p.states + (imageId to st)))
             writeAnnotationsOnly(next)
+            writeLabelMe(next, imageId, embedImage)
             replaceInMemory(next, touchOnly = true)
         }
+    }
+
+    /**
+     * Writes `<image>.json` (LabelMe v5) for one image — the user-facing
+     * annotation file. Autosaves omit `imageData` (no megabyte base64 on a
+     * 300ms debounce); explicit saves embed it.
+     */
+    private fun writeLabelMe(project: Project, imageId: String, embedImage: Boolean) {
+        val im = project.images.firstOrNull { it.id == imageId } ?: return
+        val st = project.states[imageId] ?: return
+        if (!st.hasContent) return // nothing worth a sidecar file yet
+        val bytes = if (embedImage) {
+            try {
+                workspace.openInput(project.slug, im.file)?.use { it.readBytes() }
+            } catch (e: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+        workspace.writeText(
+            project.slug,
+            LabelMeCodec.fileNameFor(im.file),
+            LabelMeCodec.encode(project, im, st, bytes),
+        )
+    }
+
+    /** Per-image LabelMe JSONs for every annotated image (no imageData). */
+    private fun writeAllLabelMe(project: Project) {
+        for (im in project.images) writeLabelMe(project, im.id, embedImage = false)
     }
 
     suspend fun setImageStatus(projectId: String, imageId: String, status: ImageStatus) = withContext(io) {
@@ -502,6 +546,7 @@ class LoomRepository(
         }
         writeMetaOnly(project)
         writeAnnotationsOnly(project)
+        writeAllLabelMe(project)
     }
 
     private fun writeMetaOnly(project: Project) {
@@ -664,6 +709,15 @@ class LoomRepository(
                     states[im.id] = ImageState(
                         dots = d.dots,
                         mesh = d.mesh,
+                        objects = d.objects.mapIndexed { oi, o ->
+                            com.testplaybyte.loom.domain.model.ObjAnn(
+                                id = "obj-restored-$oi",
+                                labelId = o.labelName?.let { name ->
+                                    project.labels.firstOrNull { it.name.equals(name, ignoreCase = true) }?.id
+                                },
+                                mesh = o.points,
+                            )
+                        },
                         strokes = d.strokes,
                         density = d.density,
                         labelId = d.labelName?.let { name ->
@@ -675,6 +729,26 @@ class LoomRepository(
                 }
                 project = project.copy(states = project.states + states)
             }
+        }
+
+        // Adopt per-image LabelMe JSONs (the user-facing annotation files):
+        // authoritative for OBJECTS whenever a sidecar exists — this is what
+        // makes hand-edited or externally produced LabelMe files show up.
+        if (project.images.isNotEmpty()) {
+            val states = HashMap(project.states)
+            for (im in project.images) {
+                val text = workspace.readText(folder, LabelMeCodec.fileNameFor(im.file)) ?: continue
+                val shapes = LabelMeCodec.decode(text)
+                val base = states[im.id] ?: ImageState.empty(_settings.value.defaultDensity)
+                val objs = LabelMeCodec.toObjects(shapes, project.labels, im.width, im.height)
+                if (shapes.isNotEmpty()) {
+                    states[im.id] = base.copy(
+                        objects = objs,
+                        status = if (base.status == ImageStatus.UNLABELED) ImageStatus.DRAFT else base.status,
+                    )
+                }
+            }
+            if (states != project.states) project = project.copy(states = states)
         }
 
         // Detect images added by hand since the last save.
@@ -707,7 +781,6 @@ class LoomRepository(
             // Adopted/mutated folders become managed on next write.
             if (metaText == null) {
                 writeMetaOnly(project)
-                writeAnnotationsOnly(project)
             } else if (added.isNotEmpty()) {
                 writeMetaOnly(project)
             }

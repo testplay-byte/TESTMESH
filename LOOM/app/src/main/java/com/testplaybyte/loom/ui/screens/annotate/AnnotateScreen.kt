@@ -64,7 +64,9 @@ import com.testplaybyte.loom.domain.seg.MaskToPolygon
 import com.testplaybyte.loom.domain.model.ImageState
 import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.ImageStatus
+import com.testplaybyte.loom.domain.model.Ids
 import com.testplaybyte.loom.domain.model.LoomRules
+import com.testplaybyte.loom.domain.model.ObjAnn
 import com.testplaybyte.loom.domain.model.ToastIcon
 import com.testplaybyte.loom.ui.LoomViewModel
 import com.testplaybyte.loom.ui.components.LoomButton
@@ -150,6 +152,25 @@ fun AnnotateScreen(
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, project.images.lastIndex)) }
     val image = project.images[index]
     val scene: CompiledScene? = image.sceneId?.let { SceneLibrary.byId(it) }
+
+    // First-run canvas hint: square-ish card, 2s, tap-dismiss, ONCE ever.
+    val hintShownEver by vm.repository.hintShown.collectAsState(initial = true)
+    var hintVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(hintShownEver) {
+        if (!hintShownEver) {
+            delay(400)
+            hintVisible = true
+            delay(2000)
+            hintVisible = false
+            vm.repository.markHintShown()
+        }
+    }
+    fun dismissHint() {
+        if (hintVisible) {
+            hintVisible = false
+            scope.launch { vm.repository.markHintShown() }
+        }
+    }
 
     // Sheets / transient UI
     var helpOpen by remember { mutableStateOf(false) }
@@ -284,18 +305,29 @@ fun AnnotateScreen(
                     if (segSig[0] != sigAtRequest || sigOf(state.present) != sigAtRequest) return@segment
                     scope.launch {
                         // Mask tracing is heavy — keep it off the main thread.
-                        val poly = withContext(Dispatchers.Default) { MaskToPolygon.trace(mask, w, h) }
-                        if (poly.isEmpty()) {
+                        // Trace DENSE (epsilon≈0) and let the adaptive fitter
+                        // place vertices: dense on curves, minimal on runs.
+                        val denseImg = withContext(Dispatchers.Default) {
+                            MaskToPolygon.trace(mask, w, h, epsilon = 0.05f)
+                        }
+                        if (denseImg.isEmpty()) {
                             state.sculpting = false
                             vm.toast("No object found — put a + dot on it", ToastIcon.WARN)
                             return@launch
                         }
-                        val world = poly.map { layout.imageToWorld(it.x, it.y) }
-                        val ring = MeshMath.resampleRing(
-                            world,
-                            LoomRules.clampDensity(state.densityDraft ?: state.present.density),
-                        )
-                        state.commit { prev -> prev.copy(mesh = ring) }
+                        val denseWorld = denseImg.map { layout.imageToWorld(it.x, it.y) }
+                        val (ring, autoDensity) = withContext(Dispatchers.Default) {
+                            MeshMath.autoFitRing(denseWorld, LoomRules.DENSITY_MIN, LoomRules.DENSITY_MAX)
+                        }
+                        state.denseRing = denseWorld
+                        state.commit { prev ->
+                            prev.copy(
+                                mesh = ring,
+                                density = autoDensity,
+                                // brush strokes are consumed by the mask
+                                strokes = emptyList(),
+                            )
+                        }
                         state.meshGen++
                         state.sculpting = false
                         pulseNow()
@@ -314,7 +346,7 @@ fun AnnotateScreen(
     // ── exit flush ───────────────────────────────────────────────────────
     fun flushAndExit() {
         scope.launch {
-            vm.repository.saveImageState(project.id, image.id, state.present)
+            vm.repository.saveImageState(project.id, image.id, state.present, embedImage = true)
             onExit()
         }
     }
@@ -438,14 +470,23 @@ fun AnnotateScreen(
                 state = state,
                 dotSizeWorld = settings.dotSize,
                 magnifier = settings.magnifier,
+                showHint = hintVisible,
+                onHintTap = { dismissHint() },
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // status pill (top-center): "sculpting…" / "mesh · N pts"
+            // status pill (top-center): "sculpting…" / "N obj · M pts"
             val meshSize = state.mesh?.size ?: 0
-            if (state.sculpting || state.mesh != null) {
+            if (state.sculpting || state.mesh != null || state.objects.isNotEmpty()) {
+                val pillText = if (state.sculpting) "sculpting…" else buildString {
+                    if (state.objects.isNotEmpty()) append("${state.objects.size} obj")
+                    if (state.mesh != null) {
+                        if (isNotEmpty()) append(" · ")
+                        append("$meshSize pts")
+                    }
+                }
                 Text(
-                    text = if (state.sculpting) "sculpting…" else "mesh · $meshSize pts",
+                    text = pillText,
                     style = loomType.monoPill,
                     color = if (state.sculpting) c.primary else c.text,
                     modifier = Modifier
@@ -490,18 +531,28 @@ fun AnnotateScreen(
                 .background(c.surface1)
                 .border(1.dp, c.hairline),
         ) {
-            // object bar — ONLY when a mesh exists
-            if (state.mesh != null) {
+            // object bar — saved objects (tap to re-edit) + the working one
+            if (state.mesh != null || state.objects.isNotEmpty()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text("Object", style = loomType.small, color = c.textMuted)
-                    Spacer(Modifier.width(10.dp))
+                    Text("Objects", style = loomType.small, color = c.textMuted)
+                    state.objects.forEach { obj ->
+                        val lbl = project.labels.firstOrNull { it.id == obj.labelId }
+                        LabelChip(
+                            name = lbl?.name ?: "Object",
+                            colorToken = lbl?.color ?: "c1",
+                            active = false,
+                            onClick = { reopenObject(state, obj.id) },
+                        )
+                    }
                     val curLabel = project.labels.firstOrNull { it.id == state.present.labelId }
-                    Box(modifier = Modifier.weight(1f)) {
+                    if (state.mesh != null) {
                         if (curLabel != null) {
                             LabelChip(
                                 name = curLabel.name,
@@ -516,8 +567,8 @@ fun AnnotateScreen(
                                 onClick = { objOpen = true },
                             )
                         }
+                        LoomIconButton(IconSettings, "Configure object", { objOpen = true }, size = 36.dp, iconSize = 16.dp)
                     }
-                    LoomIconButton(IconSettings, "Configure object", { objOpen = true }, size = 36.dp, iconSize = 16.dp)
                 }
             }
             // action row
@@ -541,7 +592,7 @@ fun AnnotateScreen(
                                 state.commit { prev ->
                                     prev.copy(
                                         density = v,
-                                        mesh = remeshForImage(image, v, prev),
+                                        mesh = remeshForImage(image, v, prev, state.denseRing),
                                     )
                                 }
                                 state.densityDraft = null
@@ -560,10 +611,36 @@ fun AnnotateScreen(
                     label = null,
                 )
                 Spacer(Modifier.weight(1f))
+                if (state.mesh != null) {
+                    LoomButton(
+                        onClick = {
+                            state.commit { prev ->
+                                val m = prev.mesh ?: return@commit prev
+                                prev.copy(
+                                    objects = prev.objects + ObjAnn(Ids.uid("obj"), prev.labelId, m, prev.density),
+                                    mesh = null,
+                                    dots = emptyList(),
+                                    strokes = emptyList(),
+                                    labelId = null,
+                                )
+                            }
+                            state.denseRing = null
+                            state.meshGen++
+                            state.selection = null
+                            pulseNow()
+                            vm.toast("Object saved — add the next one", ToastIcon.CHECK)
+                        },
+                        size = LoomButtonSize.SM,
+                        variant = LoomButtonVariant.TONAL,
+                        icon = IconCheck,
+                        label = "Save object",
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
                 LoomButton(
                     onClick = {
                         scope.launch {
-                            vm.repository.saveImageState(project.id, image.id, state.present)
+                            vm.repository.saveImageState(project.id, image.id, state.present, embedImage = true)
                             vm.repository.setImageStatus(project.id, image.id, ImageStatus.DONE)
                             pulseNow()
                             val next = index + 1
@@ -590,7 +667,7 @@ fun AnnotateScreen(
                 onSelect = { i ->
                     if (i != index) {
                         scope.launch {
-                            vm.repository.saveImageState(project.id, image.id, state.present)
+                            vm.repository.saveImageState(project.id, image.id, state.present, embedImage = true)
                             index = i
                         }
                     }
@@ -750,7 +827,7 @@ fun AnnotateScreen(
                 contentDescription = "Mesh density",
                 suffix = "pts",
                 onChange = { v ->
-                    state.commit { prev -> prev.copy(density = v, mesh = remeshForImage(image, v, prev)) }
+                    state.commit { prev -> prev.copy(density = v, mesh = remeshForImage(image, v, prev, state.denseRing)) }
                     state.meshGen++
                 },
             )
@@ -777,6 +854,25 @@ fun AnnotateScreen(
             icon = IconMesh,
             label = "Remove mesh",
         )
+        if (state.objects.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Text("SAVED OBJECTS (${state.objects.size})", style = loomType.sectionLabel, color = c.textMuted)
+            Spacer(Modifier.height(8.dp))
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                state.objects.forEach { obj ->
+                    val lbl = project.labels.firstOrNull { it.id == obj.labelId }
+                    LabelChip(
+                        name = lbl?.name ?: "Object",
+                        colorToken = lbl?.color ?: "c1",
+                        active = false,
+                        onRemove = { deleteObject(state, obj.id) },
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             text = "Removing the mesh keeps your prompt dots — the next dot change re-sculpts it.",
@@ -789,6 +885,30 @@ fun AnnotateScreen(
 // ── small pieces ──────────────────────────────────────────────────────────
 
 private fun fmt2(n: Int) = n.toString().padStart(2, '0')
+
+/** Pulls a saved object back into the working mesh for re-editing. */
+private fun reopenObject(state: AnnotateState, objId: String) {
+    val obj = state.present.objects.firstOrNull { it.id == objId } ?: return
+    state.commit { prev ->
+        prev.copy(
+            objects = prev.objects.filter { it.id != objId },
+            mesh = obj.mesh,
+            density = obj.density,
+            labelId = obj.labelId,
+            dots = emptyList(),
+            strokes = emptyList(),
+        )
+    }
+    state.denseRing = null
+    state.meshGen++
+    state.selection = null
+}
+
+/** Deletes a saved object outright. */
+private fun deleteObject(state: AnnotateState, objId: String) {
+    state.commit { prev -> prev.copy(objects = prev.objects.filter { it.id != objId }) }
+    state.meshGen++
+}
 
 private fun targetName(project: com.testplaybyte.loom.domain.model.Project, imageId: String): String =
     project.labels.firstOrNull { it.id == project.stateOf(imageId).labelId }?.name ?: "—"
@@ -959,13 +1079,16 @@ private fun remeshForImage(
     image: com.testplaybyte.loom.domain.model.ProjectImage,
     density: Int,
     prev: com.testplaybyte.loom.domain.model.ImageState,
+    denseRing: List<Pt>? = null,
 ): List<Pt>? {
     if (image.sceneId != null) {
         val anchors = SceneLibrary.byId(image.sceneId).target.anchors
         return MeshMath.buildMesh(anchors.map { a -> Pt(a.first, a.second) }, density, prev.dots)
     }
-    val mesh = prev.mesh ?: return null
-    return if (mesh.size >= 3) MeshMath.resampleRing(mesh, density) else mesh
+    // Photos re-fit ADAPTIVELY from the last dense mask contour when we
+    // have it (curves get the detail), else from the current ring.
+    val source = denseRing ?: prev.mesh ?: return null
+    return if (source.size >= 3) MeshMath.fitRing(source, density) else source
 }
 
 /**
@@ -983,9 +1106,11 @@ private fun buildSegSpecs(
         val ip = layout.worldToImage(d.x, d.y)
         specs.add(SmartSegmenter.Spec(listOf(ip), d.isPos))
     }
+    // Brush strokes are POSITIVE on photos: drawing around an object
+    // SELECTS it (Edge Gallery semantics). They are consumed on success.
     state.strokes.forEach { st ->
         val pts = st.pts.map { layout.worldToImage(it.x, it.y) }
-        if (pts.isNotEmpty()) specs.add(SmartSegmenter.Spec(pts, positive = false))
+        if (pts.isNotEmpty()) specs.add(SmartSegmenter.Spec(pts, positive = true))
     }
     return specs
 }

@@ -5,6 +5,7 @@ import com.testplaybyte.loom.domain.model.DotKind
 import com.testplaybyte.loom.domain.model.ImageState
 import com.testplaybyte.loom.domain.model.ImageStatus
 import com.testplaybyte.loom.domain.model.Label
+import com.testplaybyte.loom.domain.model.ObjAnn
 import com.testplaybyte.loom.domain.model.LoomRules
 import com.testplaybyte.loom.domain.model.Project
 import com.testplaybyte.loom.domain.model.Pt
@@ -53,10 +54,14 @@ object LoomJsonCodec {
         val density: Int,
         val dots: List<Dot>,
         val mesh: List<Pt>?,
+        val objects: List<DecodedObj>,
         val strokes: List<Stroke>,
         /** true when coordinates are real pixels (export) — caller scales. */
         val spaceIsWorld: Boolean,
     )
+
+    /** One decoded saved object: label name + polygon in file coordinates. */
+    data class DecodedObj(val labelName: String?, val points: List<Pt>)
 
     data class Decoded(val classes: List<ClassDef>, val images: List<DecodedImage>)
 
@@ -91,8 +96,13 @@ object LoomJsonCodec {
         val images = JSONArray()
         for (im in project.images) {
             val st = project.stateOf(im.id)
-            val sx = if (scaleToRealPixels) im.width / 800.0 else 1.0
-            val sy = if (scaleToRealPixels) im.height / 600.0 else 1.0
+            // World → real pixels inverts the canvas LETTERBOX (uniform
+            // scale s + centering), not an anisotropic w/800 stretch.
+            val s = if (scaleToRealPixels) minOf(800.0 / im.width, 600.0 / im.height) else 1.0
+            val dx = if (scaleToRealPixels) (800.0 - im.width * s) / 2.0 else 0.0
+            val dy = if (scaleToRealPixels) (600.0 - im.height * s) / 2.0 else 0.0
+            fun fx(x: Float) = round2((x - dx) / s)
+            fun fy(y: Float) = round2((y - dy) / s)
             val o = JSONObject()
             o.put("file", im.file)
             o.put("width", if (scaleToRealPixels) im.width else 800)
@@ -101,9 +111,10 @@ object LoomJsonCodec {
             o.put("label", project.labels.firstOrNull { it.id == st.labelId }?.name ?: JSONObject.NULL)
             o.put("tags", JSONArray(st.tags))
             o.put("density", st.density)
-            o.put("dots", dotsArray(st.dots, sx, sy))
-            o.put("mesh", meshArray(st.mesh, sx, sy))
-            o.put("strokes", strokesArray(st.strokes, sx, sy, includeMasks))
+            o.put("dots", dotsArray(st.dots, fx, fy))
+            o.put("mesh", meshArray(st.mesh, fx, fy))
+            o.put("objects", objectsArray(st, project, fx, fy))
+            o.put("strokes", strokesArray(st.strokes, fx, fy, includeMasks))
             o.put(
                 "split",
                 if (LoomRules.isValSplit(project.images.indexOf(im), project.splitPct)) "val" else "train",
@@ -128,13 +139,13 @@ object LoomJsonCodec {
         return arr
     }
 
-    private fun dotsArray(dots: List<Dot>, sx: Double, sy: Double): JSONArray {
+    private fun dotsArray(dots: List<Dot>, fx: (Float) -> Double, fy: (Float) -> Double): JSONArray {
         val arr = JSONArray()
         for (d in dots) {
             arr.put(
                 JSONObject().apply {
-                    put("x", round2(d.x * sx))
-                    put("y", round2(d.y * sy))
+                    put("x", fx(d.x))
+                    put("y", fy(d.y))
                     put("kind", if (d.isPos) "pos" else "neg")
                 },
             )
@@ -142,19 +153,37 @@ object LoomJsonCodec {
         return arr
     }
 
-    private fun meshArray(mesh: List<Pt>?, sx: Double, sy: Double): Any {
+    private fun meshArray(mesh: List<Pt>?, fx: (Float) -> Double, fy: (Float) -> Double): Any {
         if (mesh == null) return JSONObject.NULL
         val arr = JSONArray()
         for (p in mesh) {
-            arr.put(JSONArray().apply { put(round2(p.x * sx)); put(round2(p.y * sy)) })
+            arr.put(JSONArray().apply { put(fx(p.x)); put(fy(p.y)) })
+        }
+        return arr
+    }
+
+    private fun objectsArray(
+        st: ImageState,
+        project: Project,
+        fx: (Float) -> Double,
+        fy: (Float) -> Double,
+    ): JSONArray {
+        val arr = JSONArray()
+        for (obj in st.objects) {
+            arr.put(
+                JSONObject().apply {
+                    put("label", project.labels.firstOrNull { it.id == obj.labelId }?.name ?: JSONObject.NULL)
+                    put("points", meshArray(obj.mesh, fx, fy))
+                },
+            )
         }
         return arr
     }
 
     private fun strokesArray(
         strokes: List<Stroke>,
-        sx: Double,
-        sy: Double,
+        fx: (Float) -> Double,
+        fy: (Float) -> Double,
         includeMasks: Boolean,
     ): JSONArray {
         val arr = JSONArray()
@@ -162,7 +191,7 @@ object LoomJsonCodec {
         for (s in strokes) {
             val line = JSONArray()
             for (p in s.pts) {
-                line.put(JSONArray().apply { put(round2(p.x * sx)); put(round2(p.y * sy)) })
+                line.put(JSONArray().apply { put(fx(p.x)); put(fy(p.y)) })
             }
             arr.put(line)
         }
@@ -214,6 +243,7 @@ object LoomJsonCodec {
                     density = LoomRules.clampDensity(o.optInt("density", 16)),
                     dots = decodeDots(o.optJSONArray("dots")),
                     mesh = decodeMesh(o.optJSONArray("mesh")),
+                    objects = decodeObjects(o.optJSONArray("objects")),
                     strokes = decodeStrokes(o.optJSONArray("strokes")),
                     spaceIsWorld = world,
                 ),
@@ -245,6 +275,18 @@ object LoomJsonCodec {
                     y = o.optDouble("y", 0.0).toFloat(),
                 ),
             )
+        }
+        return out
+    }
+
+    private fun decodeObjects(arr: JSONArray?): List<DecodedObj> {
+        if (arr == null) return emptyList()
+        val out = ArrayList<DecodedObj>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val pts = decodeMesh(o.optJSONArray("points")) ?: continue
+            val label = if (o.isNull("label")) null else o.optString("label", "").ifEmpty { null }
+            out.add(DecodedObj(label, pts))
         }
         return out
     }

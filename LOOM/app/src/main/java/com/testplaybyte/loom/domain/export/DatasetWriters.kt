@@ -2,6 +2,7 @@ package com.testplaybyte.loom.domain.export
 
 import com.testplaybyte.loom.domain.mesh.MeshMath
 import com.testplaybyte.loom.domain.model.LoomRules
+import com.testplaybyte.loom.domain.model.ObjAnn
 import com.testplaybyte.loom.domain.model.Project
 import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.Stroke
@@ -34,7 +35,7 @@ object DatasetWriters {
         var strokes = 0
         for (im in project.images) {
             val st = project.stateOf(im.id)
-            if (st.mesh != null) meshes++
+            meshes += st.objects.size + if (st.mesh != null) 1 else 0
             dots += st.dots.size
             strokes += st.strokes.size
         }
@@ -89,35 +90,36 @@ object DatasetWriters {
         var annId = 1
         project.images.forEachIndexed { i, im ->
             val st = project.stateOf(im.id)
-            val mesh = st.mesh ?: return@forEachIndexed
-            val scale = realPoints(mesh, im.width, im.height)
             val cats = project.labels
-            val catId = cats.indexOfFirst { it.id == st.labelId }
-            if (catId < 0) return@forEachIndexed // unlabeled meshes have no category — skip
-            val segs = ArrayList<List<Double>>()
-            segs.add(flatten(scale))
-            if (project.includeMasks) {
-                for (s in st.strokes) {
-                    if (s.pts.size >= 2) segs.add(flatten(realPoints(s.pts, im.width, im.height)))
+            for (obj in st.allObjects()) {
+                val scale = realPoints(obj.mesh, im.width, im.height)
+                val catId = cats.indexOfFirst { it.id == obj.labelId }
+                if (catId < 0) continue // unlabeled objects have no category — skip
+                val segs = ArrayList<List<Double>>()
+                segs.add(flatten(scale))
+                if (project.includeMasks && obj.id == "working") {
+                    for (s in st.strokes) {
+                        if (s.pts.size >= 2) segs.add(flatten(realPoints(s.pts, im.width, im.height)))
+                    }
                 }
+                val area = MeshMath.polygonArea(scale).toDouble()
+                val bb = MeshMath.bbox(scale)
+                if (anns.isNotEmpty()) anns.append(",\n")
+                anns.append("    {")
+                anns.append("\"id\": ").append(annId++).append(", ")
+                anns.append("\"image_id\": ").append(i + 1).append(", ")
+                anns.append("\"category_id\": ").append(catId + 1).append(", ")
+                anns.append("\"segmentation\": [").append(segs.joinToString(", ") { sg -> "[" + sg.joinToString(", ") { fmt(it) } + "]" }).append("], ")
+                anns.append("\"area\": ").append(fmt(area)).append(", ")
+                anns.append("\"bbox\": [")
+                    .append(fmt(bb.x.toDouble())).append(", ")
+                    .append(fmt(bb.y.toDouble())).append(", ")
+                    .append(fmt(bb.w.toDouble())).append(", ")
+                    .append(fmt(bb.h.toDouble()))
+                    .append("], ")
+                anns.append("\"iscrowd\": 0")
+                anns.append("}")
             }
-            val area = MeshMath.polygonArea(scale).toDouble()
-            val bb = MeshMath.bbox(scale)
-            if (anns.isNotEmpty()) anns.append(",\n")
-            anns.append("    {")
-            anns.append("\"id\": ").append(annId++).append(", ")
-            anns.append("\"image_id\": ").append(i + 1).append(", ")
-            anns.append("\"category_id\": ").append(catId + 1).append(", ")
-            anns.append("\"segmentation\": [").append(segs.joinToString(", ") { s -> "[" + s.joinToString(", ") { fmt(it) } + "]" }).append("], ")
-            anns.append("\"area\": ").append(fmt(area)).append(", ")
-            anns.append("\"bbox\": [")
-                .append(fmt(bb.x.toDouble())).append(", ")
-                .append(fmt(bb.y.toDouble())).append(", ")
-                .append(fmt(bb.w.toDouble())).append(", ")
-                .append(fmt(bb.h.toDouble()))
-                .append("], ")
-            anns.append("\"iscrowd\": 0")
-            anns.append("}")
         }
         sb.append("  \"annotations\": [\n").append(anns).append("\n  ],\n")
         // categories
@@ -141,12 +143,15 @@ object DatasetWriters {
         val classIndex = project.labels.withIndex().associate { (i, l) -> l.id to i }
         for (im in project.images) {
             val st = project.stateOf(im.id)
-            val mesh = st.mesh ?: continue
-            val cat = classIndex[st.labelId] ?: continue
-            val pts = realPoints(mesh, im.width, im.height)
-            val line = yoloPolygonLine(cat, pts, im.width, im.height)
+            val lines = ArrayList<String>()
+            for (obj in st.allObjects()) {
+                val cat = classIndex[obj.labelId] ?: continue
+                val pts = realPoints(obj.mesh, im.width, im.height)
+                lines.add(yoloPolygonLine(cat, pts, im.width, im.height))
+            }
+            if (lines.isEmpty()) continue
             val base = im.file.substringBeforeLast('.', im.file)
-            files.add(ExportFile("labels/$base.txt", line + "\n"))
+            files.add(ExportFile("labels/$base.txt", lines.joinToString("\n") + "\n"))
         }
         files.add(
             ExportFile(
@@ -180,12 +185,9 @@ object DatasetWriters {
         val files = ArrayList<ExportFile>()
         for (im in project.images) {
             val st = project.stateOf(im.id)
-            val mesh = st.mesh
-            val label = project.labels.firstOrNull { it.id == st.labelId }
-            // Emit an XML for every image with a labeled mesh (mirrors COCO).
-            if (mesh == null || label == null) continue
-            val pts = realPoints(mesh, im.width, im.height)
-            val bb = MeshMath.bbox(pts)
+            val objs = st.allObjects().filter { o -> project.labels.any { it.id == o.labelId } }
+            // Emit an XML for every image with a labeled object (mirrors COCO).
+            if (objs.isEmpty()) continue
             val sb = StringBuilder()
             sb.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
             sb.append("<annotation>\n")
@@ -196,24 +198,29 @@ object DatasetWriters {
             sb.append("    <depth>3</depth>\n")
             sb.append("  </size>\n")
             sb.append("  <segmented>1</segmented>\n")
-            sb.append("  <object>\n")
-            sb.append("    <name>").append(xmlEscape(label.name)).append("</name>\n")
-            sb.append("    <pose>Unspecified</pose>\n")
-            sb.append("    <truncated>0</truncated>\n")
-            sb.append("    <difficult>0</difficult>\n")
-            sb.append("    <bndbox>\n")
-            sb.append("      <xmin>").append(bb.x.roundToInt()).append("</xmin>\n")
-            sb.append("      <ymin>").append(bb.y.roundToInt()).append("</ymin>\n")
-            sb.append("      <xmax>").append((bb.x + bb.w).roundToInt()).append("</xmax>\n")
-            sb.append("      <ymax>").append((bb.y + bb.h).roundToInt()).append("</ymax>\n")
-            sb.append("    </bndbox>\n")
-            sb.append("    <polygon>\n")
-            for (p in pts) {
-                sb.append("      <pt><x>").append(p.x.roundToInt())
-                    .append("</x><y>").append(p.y.roundToInt()).append("</y></pt>\n")
+            for (obj in objs) {
+                val label = project.labels.first { it.id == obj.labelId }
+                val pts = realPoints(obj.mesh, im.width, im.height)
+                val bb = MeshMath.bbox(pts)
+                sb.append("  <object>\n")
+                sb.append("    <name>").append(xmlEscape(label.name)).append("</name>\n")
+                sb.append("    <pose>Unspecified</pose>\n")
+                sb.append("    <truncated>0</truncated>\n")
+                sb.append("    <difficult>0</difficult>\n")
+                sb.append("    <bndbox>\n")
+                sb.append("      <xmin>").append(bb.x.roundToInt()).append("</xmin>\n")
+                sb.append("      <ymin>").append(bb.y.roundToInt()).append("</ymin>\n")
+                sb.append("      <xmax>").append((bb.x + bb.w).roundToInt()).append("</xmax>\n")
+                sb.append("      <ymax>").append((bb.y + bb.h).roundToInt()).append("</ymax>\n")
+                sb.append("    </bndbox>\n")
+                sb.append("    <polygon>\n")
+                for (p in pts) {
+                    sb.append("      <pt><x>").append(p.x.roundToInt())
+                        .append("</x><y>").append(p.y.roundToInt()).append("</y></pt>\n")
+                }
+                sb.append("    </polygon>\n")
+                sb.append("  </object>\n")
             }
-            sb.append("    </polygon>\n")
-            sb.append("  </object>\n")
             // Exclusion strokes as a documented extension (not standard VOC).
             if (project.includeMasks && st.strokes.isNotEmpty()) {
                 sb.append("  <exclusions>\n")
@@ -237,12 +244,26 @@ object DatasetWriters {
 
     // ── helpers ────────────────────────────────────────────────────────────
 
-    /** World points → real image pixels. */
+    /** Every annotation polygon of a state: saved objects, then the working mesh. */
+    private fun com.testplaybyte.loom.domain.model.ImageState.allObjects(): List<ObjAnn> =
+        objects + listOfNotNull(workingObj())
+
+    /** The working mesh as a pseudo-object (label from the state), or null. */
+    private fun com.testplaybyte.loom.domain.model.ImageState.workingObj(): ObjAnn? =
+        mesh?.let { ObjAnn(id = "working", labelId = labelId, mesh = it, density = density) }
+
+    /**
+     * World (800×600) → real image pixels, inverting the canvas letterbox:
+     * the photo is rendered at s = min(800/w, 600/h), centered — so the
+     * inverse is ((x-dx)/s, (y-dy)/s), NOT an anisotropic w/800 stretch
+     * (which misplaced every non-4:3 polygon).
+     */
     fun realPoints(pts: List<Pt>, width: Int, height: Int): List<Pt> {
         if (width == 800 && height == 600) return pts
-        val sx = width / 800f
-        val sy = height / 600f
-        return pts.map { Pt(it.x * sx, it.y * sy) }
+        val s = min(800f / width, 600f / height)
+        val dx = (800f - width * s) / 2f
+        val dy = (600f - height * s) / 2f
+        return pts.map { Pt((it.x - dx) / s, (it.y - dy) / s) }
     }
 
     private fun flatten(pts: List<Pt>): List<Double> {
