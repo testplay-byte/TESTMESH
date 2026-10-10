@@ -457,8 +457,7 @@ private fun Column3Hint(modifier: Modifier = Modifier, onTap: () -> Unit) {
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "Tap + dots on the object — Magic Touch masks it.
-− dots remove areas.",
+                text = "Tap + dots on the object — Magic Touch masks it.\n− dots remove areas.",
                 style = loomType.small.copy(fontSize = 12.5.sp),
                 color = c.text,
             )
