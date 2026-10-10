@@ -37,7 +37,7 @@ import com.testplaybyte.loom.ui.theme.LoomMotion
  * The navigation graph (docs/04 §1) with the prototype's screen-enter
  * motion (`lm-enter`: fade + 6dp up slide, 240ms).
  *
- * First-run gate: until `perms.unlocked` (all grants or the limited-access
+ * First-run gate: until `perms.unlocked` (any grant or the limited-access
  * skip), Permissions is the only reachable place after the splash — the
  * gate is evaluated against PERSISTED state (we wait for `hydrated`).
  */

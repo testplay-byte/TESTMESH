@@ -170,8 +170,8 @@ data class Perms(
     val skipped: Boolean = false,
 ) {
     val allGranted: Boolean get() = media && files && folder
-    /** Gate rule (docs/04 §1): any grant OR skip unlocks the app. */
-    val unlocked: Boolean get() = allGranted || skipped
+    /** Gate rule (docs/04 §1): any single grant OR skip unlocks the app. */
+    val unlocked: Boolean get() = media || files || folder || skipped
 
     companion object {
         val DEFAULT = Perms()
