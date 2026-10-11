@@ -70,7 +70,8 @@ data class ImageState(
             strokes.isNotEmpty() || tags.isNotEmpty() || status != ImageStatus.UNLABELED
 
     companion object {
-        fun empty(density: Int): ImageState = ImageState(density = density)
+        fun empty(density: Int, auto: Boolean = true): ImageState =
+            ImageState(density = density, densityAuto = auto)
     }
 }
 

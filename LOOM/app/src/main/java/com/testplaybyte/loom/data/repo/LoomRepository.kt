@@ -261,7 +261,7 @@ class LoomRepository(
     /** @return true when [deleteFromDisk] was requested AND the folder went away. */
     suspend fun deleteProject(projectId: String, deleteFromDisk: Boolean = false): Boolean = withContext(io) {
         mutex.withLock {
-            val p = projectById(projectId) ?: return@withLock
+            val p = projectById(projectId) ?: return@withLock false
             var folderGone = false
             if (deleteFromDisk) {
                 // Owner-confirmed: the whole folder (images + annotations)
