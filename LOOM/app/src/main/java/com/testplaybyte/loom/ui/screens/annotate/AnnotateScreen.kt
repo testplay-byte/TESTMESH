@@ -217,6 +217,16 @@ fun AnnotateScreen(
     var workingObj by remember { mutableStateOf<ObjAnn?>(null) }
     var workingObjIndex by remember { mutableIntStateOf(-1) }
 
+    /**
+     * Brush strokes already CONSUMED by the last segmentation, kept as
+     * context so later +/− dots REFINE the same selection instead of
+     * segmenting from the lone new dot (the "dots don't adjust after a
+     * brush" bug). Transient — reset whenever the object context changes.
+     */
+    val segContextStrokes = remember {
+        mutableListOf<com.testplaybyte.loom.domain.model.Stroke>()
+    }
+
     val workingDirty: Boolean = state.mesh != null &&
         (
             workingObj == null ||
@@ -379,16 +389,6 @@ fun AnnotateScreen(
     val lastSig = remember { arrayOf<String?>(null) }      // last prompt signature processed
     val segSig = remember { arrayOf<String?>(null) }       // signature the in-flight request was built from
     var suppressAuto by remember { mutableStateOf(false) }
-
-    /**
-     * Brush strokes already CONSUMED by the last segmentation, kept as
-     * context so later +/− dots REFINE the same selection instead of
-     * segmenting from the lone new dot (the "dots don't adjust after a
-     * brush" bug). Transient — reset whenever the object context changes.
-     */
-    val segContextStrokes = remember {
-        mutableListOf<com.testplaybyte.loom.domain.model.Stroke>()
-    }
 
     val promptSig = remember(state.present.dots, state.present.strokes) { sigOf(state.present) }
 
