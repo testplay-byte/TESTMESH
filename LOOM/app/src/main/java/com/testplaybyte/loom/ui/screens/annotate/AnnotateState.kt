@@ -9,8 +9,8 @@ import com.testplaybyte.loom.domain.model.Dot
 import com.testplaybyte.loom.domain.model.ImageState
 import com.testplaybyte.loom.domain.model.Pt
 
-/** The six canvas tools (docs/03 §6 tool bar). */
-enum class Tool { PAN, DOT_POS, DOT_NEG, BRUSH, EDIT, ERASER }
+/** The seven canvas tools (docs/03 §6 tool bar + the DRAW-mesh tool). */
+enum class Tool { PAN, DOT_POS, DOT_NEG, BRUSH, DRAW, EDIT, ERASER }
 
 /** What is currently selected on the canvas (edit tool). */
 sealed interface Selection {
@@ -23,6 +23,8 @@ sealed interface Live {
     data class VertexLive(val index: Int, val pos: Pt) : Live
     data class DotLive(val id: String, val pos: Pt) : Live
     data class BrushLive(val pts: List<Pt>) : Live
+    /** Freehand DRAW-mesh path in flight (becomes the mesh on release). */
+    data class DrawLive(val pts: List<Pt>) : Live
 }
 
 /** Camera: world → screen is `p * scale + t`. */

@@ -221,7 +221,9 @@ object LoomJsonCodec {
                 ClassDef(
                     id = c.optString("id", "").ifEmpty { null },
                     name = c.optString("name", ""),
-                    color = c.optString("color", "c1"),
+                    // empty → caller assigns via LoomRules.classToken (amber c1
+                    // is reserved for the working mesh)
+                    color = c.optString("color", ""),
                 ),
             )
         }

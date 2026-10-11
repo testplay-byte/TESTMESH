@@ -301,6 +301,15 @@ val IconMesh: ImageVector by lazy {
     }
 }
 
+/** Freehand draw-mesh tool: a stroke drawn between two nodes. */
+val IconDrawMesh: ImageVector by lazy {
+    loomIcon("DrawMesh") {
+        stroke("M5.2 17.4c2.8-5.2 4.6-8.9 6.1-8.9 1.4 0 1.3 4.6 2.8 4.6 1.6 0 2.4-4.2 3.9-4.2 1 0 1.7 1.9 2.2 5.6")
+        fill("M5.2 15.8a1.7 1.7 0 1 1 0 3.4a1.7 1.7 0 0 1 0-3.4z")
+        fill("M18.6 13.9a1.7 1.7 0 1 1 0 3.4a1.7 1.7 0 0 1 0-3.4z")
+    }
+}
+
 val IconSparkles: ImageVector by lazy {
     loomIcon("Sparkles") {
         stroke("M12 4l1.7 4.6L18 10l-4.3 1.4L12 16l-1.7-4.6L6 10l4.3-1.4Z")

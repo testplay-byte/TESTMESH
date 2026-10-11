@@ -103,6 +103,18 @@ class LoomPreferences(private val context: Context) {
         }
     }
 
+    /**
+     * Un-dismiss a folder slug — the user deliberately created a project
+     * with that name again, so the folder must be scannable from now on
+     * (deleting a project dismisses its slug forever; without this a NEW
+     * project with the same name silently vanished on the next rescan).
+     */
+    suspend fun removeDismissed(folder: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.DISMISSED] = (prefs[Keys.DISMISSED] ?: emptySet()) - folder
+        }
+    }
+
     /** Clear-all: wipes every Loom preference (docs/03 §8 Data section). */
     suspend fun clearAll() {
         context.dataStore.edit { it.clear() }

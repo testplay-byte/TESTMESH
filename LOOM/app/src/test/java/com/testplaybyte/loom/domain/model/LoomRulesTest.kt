@@ -60,6 +60,15 @@ class LoomRulesTest {
     }
 
     @Test
+    fun classTokensSkipAmber() {
+        // c1 (amber) is reserved for the working mesh — labels start at c2
+        assertEquals("c2", LoomRules.classToken(0))
+        assertEquals("c8", LoomRules.classToken(6))
+        assertEquals("c2", LoomRules.classToken(7))
+        assertTrue(LoomRules.classToken(3) != "c1")
+    }
+
+    @Test
     fun splitAssignmentSpreadsValsDeterministically() {
         // 20% of 10 images: indices 4 and 9 are val (Bresenham spread).
         val vals10 = (0 until 10).filter { LoomRules.isValSplit(it, 20) }

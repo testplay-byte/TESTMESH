@@ -68,6 +68,7 @@ import com.testplaybyte.loom.domain.mesh.MeshMath
 import com.testplaybyte.loom.domain.model.Dot
 import com.testplaybyte.loom.domain.model.DotKind
 import com.testplaybyte.loom.domain.model.Ids
+import com.testplaybyte.loom.domain.model.LoomRules
 import com.testplaybyte.loom.domain.model.Pt
 import com.testplaybyte.loom.domain.model.Stroke as LoomStroke
 import com.testplaybyte.loom.ui.icons.IconClose
@@ -195,6 +196,16 @@ fun CanvasStage(
             val cam = state.cam
             val liveMesh = state.liveMesh()
             val liveDots = state.liveDots()
+            // screen→world factor: multiply a screen-px size by this to
+            // draw it zoom-invariant (constant ON-SCREEN size) inside the
+            // world transform — dots and handles must NOT grow with zoom.
+            val px = 1f / cam.scale
+            // prompt dots only exist while a dot tool is active — in mesh/
+            // edit/brush view they disappear (owner req)
+            val dotsVisible = state.tool == Tool.DOT_POS || state.tool == Tool.DOT_NEG
+            // while a NEW object is being annotated, saved objects dim to
+            // almost nothing so their borders never compete for attention
+            val workingNow = state.mesh != null
 
             // ── world transform ─────────────────────────────────────────
             translate(cam.tx, cam.ty) {
@@ -213,23 +224,37 @@ fun CanvasStage(
                         color = c.hairlineStrong,
                         topLeft = Offset(0.5f, 0.5f),
                         size = Size(WORLD_W - 1f, WORLD_H - 1f),
-                        style = Stroke(width = 1f / cam.scale),
+                        style = Stroke(width = 1f * px),
                     )
 
                     // prompt strokes (below the mesh): on real photos the
                     // brush SELECTS (green, like + dots); on scenes it
                     // EXCLUDES (coral) — matching what the segmenter does
                     val strokeColor = if (scene == null && photo != null) c.pos else c.neg
-                    for (s in state.strokes) drawStrokePath(s, strokeColor)
+                    for (s in state.strokes) drawStrokePolyline(s.pts, strokeColor, 3.5f * px)
                     (state.live as? Live.BrushLive)?.let { brush ->
-                        drawStrokePolyline(brush.pts, strokeColor)
+                        drawStrokePolyline(brush.pts, strokeColor, 3.5f * px)
+                    }
+                    // freehand DRAW-mesh path in flight — mesh-colored
+                    (state.live as? Live.DrawLive)?.let { drawLive ->
+                        drawStrokePolyline(
+                            drawLive.pts,
+                            labelColors[state.present.labelId] ?: c.mesh,
+                            2.5f * px,
+                        )
                     }
 
                     // saved objects sit under the working mesh, dimmer,
-                    // each in its CLASS color
+                    // each in its CLASS color (fill follows the class too)
                     for (obj in state.present.objects) {
                         if (obj.mesh.size < 3) continue
-                        drawObjectMesh(obj.mesh, labelColors[obj.labelId] ?: c.mesh, c, cam.scale)
+                        drawObjectMesh(
+                            obj.mesh,
+                            labelColors[obj.labelId] ?: c.mesh,
+                            c,
+                            dim = workingNow,
+                            px = px,
+                        )
                     }
 
                     // mesh: soft fill + CLASS-colored line + ants + handles
@@ -240,19 +265,17 @@ fun CanvasStage(
                             drawPath(path, color = meshColor.copy(alpha = 0.14f))
                             drawPath(
                                 path, color = meshColor,
-                                style = Stroke(width = 2f / cam.scale, join = StrokeJoin.Round),
+                                style = Stroke(width = 2f * px, join = StrokeJoin.Round),
                             )
                             // marching ants: dash period and offset in world units
-                            val dash = 6f / cam.scale
-                            val gap = 5f / cam.scale
                             drawPath(
                                 path, color = c.canvas,
                                 style = Stroke(
-                                    width = 1.3f / cam.scale,
+                                    width = 1.3f * px,
                                     join = StrokeJoin.Round,
                                     pathEffect = PathEffect.dashPathEffect(
-                                        floatArrayOf(dash, gap),
-                                        phase = -antsPhase * (11f / cam.scale),
+                                        floatArrayOf(6f * px, 5f * px),
+                                        phase = -antsPhase * 11f * px,
                                     ),
                                 ),
                             )
@@ -262,18 +285,22 @@ fun CanvasStage(
                                     val q = liveMesh[(i + 1) % liveMesh.size]
                                     val armed = state.pendingMid == i
                                     val m = Offset((p.x + q.x) / 2f, (p.y + q.y) / 2f)
+                                    val mr = (if (armed) 4.dp else 3.dp).toPx() * px
                                     drawCircle(
                                         color = if (armed) meshColor else c.canvas,
-                                        radius = if (armed) 2.8f else 2.0f,
+                                        radius = mr,
                                         center = m,
                                     )
                                     drawCircle(
                                         color = if (armed) c.canvas else meshColor,
-                                        radius = if (armed) 2.8f else 2.0f,
+                                        radius = mr,
                                         center = m,
-                                        style = Stroke(width = 1.2f),
+                                        style = Stroke(width = 1.2f * px),
                                     )
                                 }
+                                val vR = 3.dp.toPx() * px
+                                val vSelR = 5.dp.toPx() * px
+                                val vHaloR = 14.dp.toPx() * px
                                 for (i in liveMesh.indices) {
                                     val p = liveMesh[i]
                                     val selected = (state.selection as? Selection.Vertex)?.index == i
@@ -282,34 +309,37 @@ fun CanvasStage(
                                         // target must be obvious)
                                         drawCircle(
                                             color = meshColor.copy(alpha = 0.35f),
-                                            radius = 9f,
+                                            radius = vHaloR,
                                             center = Offset(p.x, p.y),
                                         )
                                     }
                                     drawCircle(
                                         color = Color(0xFFFFFDF6),
-                                        radius = if (selected) 4.2f else 2.6f,
+                                        radius = if (selected) vSelR else vR,
                                         center = Offset(p.x, p.y),
                                     )
                                     drawCircle(
                                         color = if (selected) c.primary else meshColor,
-                                        radius = if (selected) 4.2f else 2.6f,
+                                        radius = if (selected) vSelR else vR,
                                         center = Offset(p.x, p.y),
-                                        style = Stroke(width = if (selected) 2f else 1.6f),
+                                        style = Stroke(width = (if (selected) 2f else 1.6f) * px),
                                     )
                                 }
                             }
                         }
                     }
 
-                    // prompt dots
-                    for ((i, d) in liveDots.withIndex()) {
-                        val selected = (state.selection as? Selection.DotSel)?.id == d.id
-                        // staggered pop: later dots lag slightly
-                        val stagger = (i % 16) * 0.06f
-                        val s = clamp((dotPop.value - stagger) / (1f - stagger).coerceAtLeast(0.01f), 0.4f, 1f)
-                        scale(s, s, pivot = Offset(d.x, d.y)) {
-                            drawDot(d, dotSizeWorld.toFloat(), selected, c, cam.scale)
+                    // prompt dots (dot tools only — hidden in mesh view)
+                    if (dotsVisible) {
+                        val dotScreenR = (dotSizeWorld * 0.9f).dp.toPx() * px
+                        for ((i, d) in liveDots.withIndex()) {
+                            val selected = (state.selection as? Selection.DotSel)?.id == d.id
+                            // staggered pop: later dots lag slightly
+                            val stagger = (i % 16) * 0.06f
+                            val s = clamp((dotPop.value - stagger) / (1f - stagger).coerceAtLeast(0.01f), 0.4f, 1f)
+                            scale(s, s, pivot = Offset(d.x, d.y)) {
+                                drawDot(d, dotScreenR, selected, c, px)
+                            }
                         }
                     }
                 }
@@ -355,18 +385,23 @@ private fun polygonPath(pts: List<Pt>): Path = Path().apply {
     close()
 }
 
-/** A saved object in its class color: dim fill + hairline, no handles. */
+/**
+ * A saved object in its class color: class-tinted fill + hairline, no
+ * handles. [dim] = a NEW object is being annotated: the saved ones fade
+ * to a whisper so their borders never compete with the work in progress.
+ */
 private fun DrawScope.drawObjectMesh(
     mesh: List<Pt>,
     color: Color,
     c: com.testplaybyte.loom.ui.theme.LoomColors,
-    camScale: Float,
+    dim: Boolean,
+    px: Float,
 ) {
     val path = polygonPath(mesh)
-    drawPath(path, color = c.meshSoft.copy(alpha = 0.5f))
+    if (!dim) drawPath(path, color = color.copy(alpha = 0.10f))
     drawPath(
-        path, color = color.copy(alpha = 0.6f),
-        style = Stroke(width = 1.4f / camScale, join = StrokeJoin.Round),
+        path, color = color.copy(alpha = if (dim) 0.22f else 0.6f),
+        style = Stroke(width = 1.4f * px, join = StrokeJoin.Round),
     )
 }
 
@@ -401,10 +436,7 @@ private fun DrawScope.drawGrid(color: Color, camScale: Float) {
     }
 }
 
-private fun DrawScope.drawStrokePath(s: LoomStroke, color: Color) =
-    drawStrokePolyline(s.pts, color)
-
-private fun DrawScope.drawStrokePolyline(pts: List<Pt>, color: Color) {
+private fun DrawScope.drawStrokePolyline(pts: List<Pt>, color: Color, widthWorld: Float) {
     if (pts.isEmpty()) return
     val path = Path().apply {
         moveTo(pts[0].x, pts[0].y)
@@ -412,51 +444,48 @@ private fun DrawScope.drawStrokePolyline(pts: List<Pt>, color: Color) {
     }
     drawPath(
         path = path,
-        color = color.copy(alpha = 0.55f),
-        style = Stroke(width = 26f, cap = StrokeCap.Round, join = StrokeJoin.Round),
+        color = color.copy(alpha = 0.6f),
+        style = Stroke(width = widthWorld, cap = StrokeCap.Round, join = StrokeJoin.Round),
     )
 }
 
 /**
- * Dot glyphs (canvas.css): positive = mint disc + hairline canvas ring +
- * white core; negative = coral dashed ring + minus. The rings are world
- * units, matching the SVG source.
+ * Dot glyphs — a MATCHED pair (owner req): filled disc (mint/coral),
+ * canvas ring, and the actual +/− glyph inside. [r] is the screen radius
+ * already converted to world units by the caller; [px] keeps ring/glyph
+ * strokes zoom-invariant too.
  */
-private fun DrawScope.drawDot(d: Dot, dotSize: Float, selected: Boolean, c: com.testplaybyte.loom.ui.theme.LoomColors, camScale: Float) {
+private fun DrawScope.drawDot(
+    d: Dot,
+    r: Float,
+    selected: Boolean,
+    c: com.testplaybyte.loom.ui.theme.LoomColors,
+    px: Float,
+) {
     val center = Offset(d.x, d.y)
     if (selected) {
         drawCircle(
             color = c.primary,
-            radius = dotSize + 6f,
+            radius = r + 5f * px,
             center = center,
             style = Stroke(
-                width = 2f / camScale,
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f)),
+                width = 2f * px,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f * px, 3f * px)),
             ),
         )
     }
-    if (d.kind == DotKind.POS) {
-        drawCircle(color = c.pos, radius = dotSize, center = center)
-        drawCircle(
-            color = c.canvas, radius = dotSize, center = center,
-            style = Stroke(width = 2f),
-        )
-        drawCircle(color = Color(0xFFFFFDF6), radius = dotSize * 0.42f, center = center)
-    } else {
-        drawCircle(
-            color = c.neg, radius = dotSize, center = center,
-            style = Stroke(
-                width = 2.4f,
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.5f, 3.4f)),
-            ),
-        )
-        drawLine(
-            color = c.neg,
-            start = Offset(d.x - dotSize * 0.55f, d.y),
-            end = Offset(d.x + dotSize * 0.55f, d.y),
-            strokeWidth = 2.6f,
-            cap = StrokeCap.Round,
-        )
+    val col = if (d.isPos) c.pos else c.neg
+    drawCircle(color = col, radius = r, center = center)
+    drawCircle(
+        color = c.canvas, radius = r, center = center,
+        style = Stroke(width = 1.6f * px),
+    )
+    // the +/− glyph, in the canvas ink (contrasts on both polarity colors)
+    val arm = r * 0.52f
+    val w = 2f * px
+    drawLine(c.canvas, Offset(d.x - arm, d.y), Offset(d.x + arm, d.y), strokeWidth = w, cap = StrokeCap.Round)
+    if (d.isPos) {
+        drawLine(c.canvas, Offset(d.x, d.y - arm), Offset(d.x, d.y + arm), strokeWidth = w, cap = StrokeCap.Round)
     }
 }
 
@@ -519,13 +548,18 @@ private fun LoupeOverlay(
         else -> null
     } ?: return
     val cam = state.cam
-    val half = LOUPE_PX / 2f
+    // The loupe Box is sized in dp but positions/clamps are px math —
+    // convert ONCE. (Using the raw constant mixed units: on a 3x-density
+    // screen the 336px circle was clamped as if it were 112px, pushing it
+    // off the right/top edge — the "loupe outside the display" bug.)
+    val loupePx = with(LocalDensity.current) { LOUPE_PX.dp.toPx() }
+    val half = loupePx / 2f
     // Fixed parking spot in a TOP corner, far from the finger — it flips
     // to the top-left when the drag happens in the top-right region so it
     // never covers the work area or leaves the viewport.
     val dragSx = pos.x * cam.scale + cam.tx
     val dragSy = pos.y * cam.scale + cam.ty
-    val nearTopRight = dragSy < LOUPE_PX + 60f && dragSx > viewport.width - LOUPE_PX - 60f
+    val nearTopRight = dragSy < loupePx + 60f && dragSx > viewport.width - loupePx - 60f
     val cx = if (nearTopRight) half + 16f else viewport.width - half - 16f
     val cy = 16f + half
     val lvw = LOUPE_PX / LOUPE_MAG
@@ -541,8 +575,8 @@ private fun LoupeOverlay(
         modifier = Modifier
             .offset {
                 IntOffset(
-                    clamp(cx - half, 0f, max(0f, viewport.width - LOUPE_PX)).toInt(),
-                    clamp(cy - half, 0f, max(0f, viewport.height - LOUPE_PX)).toInt(),
+                    clamp(cx - half, 0f, max(0f, viewport.width - loupePx)).toInt(),
+                    clamp(cy - half, 0f, max(0f, viewport.height - loupePx)).toInt(),
                 )
             }
             .size(LOUPE_PX.dp)
@@ -662,9 +696,12 @@ private class Gestures(
     private var userTouched = false
     private val hitPx get() = HIT_DP * densityPx
     private val slopPx get() = SLOP_DP * densityPx
+    /** Vertex/dot drag threshold — generous slop made slight nudges
+     *  "not a move" and snap the handle back on release. */
+    private val dragSlopPx get() = 6f * densityPx
     private val edgeSnapPx get() = EDGE_SNAP_DP * densityPx
 
-    private enum class Kind { NONE, PAN, PINCH, VERTEX, DOT, BRUSH }
+    private enum class Kind { NONE, PAN, PINCH, VERTEX, DOT, BRUSH, DRAW }
     private var kind = Kind.NONE
     private var vertexIndex = -1
     private var dotId: String? = null
@@ -679,9 +716,14 @@ private class Gestures(
     private var pinchWorldMid = Pt(0f, 0f)
     private var brushId: String? = null
     private val brushPts = ArrayList<Pt>()
+    private val drawPts = ArrayList<Pt>()
     private var lastTapTime = 0L
     private var lastTapX = 0f
     private var lastTapY = 0f
+    /** The press position in WORLD coords, frozen at gesture start — the
+     *  moved-check must measure CUMULATIVE distance (measuring per-event
+     *  deltas made slow drags never cross the slop → snap-back). */
+    private var pressWorld0 = Pt(0f, 0f)
 
     private enum class TapIntent { NONE, INSERT, DESELECT }
 
@@ -733,8 +775,14 @@ private class Gestures(
         }
         val ww = WORLD_W * cam.scale
         val wh = WORLD_H * cam.scale
-        val tx = if (ww <= size.width) (size.width - ww) / 2f else clamp(cam.tx, MIN_VISIBLE - ww, size.width - MIN_VISIBLE)
-        val ty = if (wh <= size.height) (size.height - wh) / 2f else clamp(cam.ty, MIN_VISIBLE - wh, size.height - MIN_VISIBLE)
+        // Free pan on BOTH axes: when the world is smaller than the
+        // viewport it is still draggable (≥ MIN_VISIBLE px stays visible).
+        // The old "centered when smaller" branch locked vertical panning
+        // at fit zoom (portrait phones: wide-but-short world).
+        val minVisW = min(ww, MIN_VISIBLE)
+        val minVisH = min(wh, MIN_VISIBLE)
+        val tx = clamp(cam.tx, minVisW - ww, size.width - minVisW)
+        val ty = clamp(cam.ty, minVisH - wh, size.height - minVisH)
         state.setCamera(Cam(cam.scale, tx, ty))
     }
 
@@ -913,6 +961,7 @@ private class Gestures(
         val w = toWorld(pos)
         pressStage = pos
         pressWorld = w
+        pressWorld0 = w
         moved = false
         tapIntent = TapIntent.NONE
         when (state.tool) {
@@ -943,6 +992,12 @@ private class Gestures(
                 brushPts.clear()
                 brushPts.add(w)
                 state.live = Live.BrushLive(brushPts.toList())
+            }
+            Tool.DRAW -> {
+                kind = Kind.DRAW
+                drawPts.clear()
+                drawPts.add(w)
+                state.live = Live.DrawLive(drawPts.toList())
             }
             Tool.ERASER -> {
                 val hit = hitStroke(w)
@@ -1034,7 +1089,7 @@ private class Gestures(
             }
             Kind.VERTEX -> {
                 val w = toWorld(pos)
-                if (!moved && hypot(w.x - pressWorld.x, w.y - pressWorld.y) * state.cam.scale > slopPx) {
+                if (!moved && hypot(w.x - pressWorld0.x, w.y - pressWorld0.y) * state.cam.scale > dragSlopPx) {
                     moved = true
                 }
                 pressWorld = w
@@ -1042,7 +1097,7 @@ private class Gestures(
             }
             Kind.DOT -> {
                 val w = toWorld(pos)
-                if (!moved && hypot(w.x - pressWorld.x, w.y - pressWorld.y) * state.cam.scale > slopPx) moved = true
+                if (!moved && hypot(w.x - pressWorld0.x, w.y - pressWorld0.y) * state.cam.scale > dragSlopPx) moved = true
                 pressWorld = w
                 state.live = Live.DotLive(dotId ?: "", w)
             }
@@ -1052,6 +1107,14 @@ private class Gestures(
                 if (last == null || hypot(w.x - last.x, w.y - last.y) >= 1.5f) {
                     brushPts.add(w)
                     state.live = Live.BrushLive(brushPts.toList())
+                }
+            }
+            Kind.DRAW -> {
+                val w = toWorld(pos)
+                val last = drawPts.lastOrNull()
+                if (last == null || hypot(w.x - last.x, w.y - last.y) >= 1.5f) {
+                    drawPts.add(w)
+                    state.live = Live.DrawLive(drawPts.toList())
                 }
             }
             Kind.NONE -> {
@@ -1080,6 +1143,7 @@ private class Gestures(
             Kind.VERTEX -> if (moved) commitVertex(vertexIndex, (state.live as? Live.VertexLive)?.pos)
             Kind.DOT -> if (moved) commitDot(dotId, (state.live as? Live.DotLive)?.pos)
             Kind.BRUSH -> commitBrush()
+            Kind.DRAW -> finishDraw()
             else -> Unit
         }
         state.live = null
@@ -1149,6 +1213,7 @@ private class Gestures(
                 if (moved) commitDot(dotId, (state.live as? Live.DotLive)?.pos)
             }
             Kind.BRUSH -> commitBrush()
+            Kind.DRAW -> finishDraw()
             else -> Unit
         }
         state.live = null
@@ -1190,5 +1255,34 @@ private class Gestures(
         }
         brushPts.clear()
         brushId = null
+    }
+
+    /**
+     * DRAW-mesh release: the freehand path closes into a ring and the
+     * adaptive fitter places the vertices — dense where the finger curved,
+     * sparse on straight runs. Auto density → the optimal minimal fit;
+     * manual → refit at the user's vertex count. The drawn shape is kept
+     * as [AnnotateState.denseRing] so the density stepper can re-fit it.
+     */
+    private fun finishDraw() {
+        val raw = drawPts.toList()
+        drawPts.clear()
+        if (raw.size < 3) return
+        // close the loop the finger implied
+        val closed = if (hypot(raw.first().x - raw.last().x, raw.first().y - raw.last().y) > 4f) {
+            raw + raw.first()
+        } else {
+            raw
+        }
+        state.commit { prev ->
+            if (prev.densityAuto) {
+                val (ring, n) = MeshMath.autoFitRing(closed, LoomRules.DENSITY_MIN, LoomRules.DENSITY_MAX)
+                prev.copy(mesh = ring, density = n)
+            } else {
+                prev.copy(mesh = MeshMath.fitRing(closed, LoomRules.clampDensity(prev.density)))
+            }
+        }
+        state.denseRing = closed
+        state.meshGen++
     }
 }

@@ -265,7 +265,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(14.dp))
             SectionLabel("About")
             LoomCard(contentPadding = PaddingValues(14.dp)) {
-                AboutRow("Loom", "0.4.0 · prototype")
+                AboutRow("Loom", "0.8.0 · prototype")
                 AboutRow("Design language", "Loom — warm graphite + signal amber")
                 // The prototype ships the repo name of its own demo; this
                 // build points at the real repository instead.

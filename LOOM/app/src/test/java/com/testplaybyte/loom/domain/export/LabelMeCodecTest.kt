@@ -52,7 +52,8 @@ class LabelMeCodecTest {
         val sh = shapes.getJSONObject(0)
         assertEquals("CAMERA", sh.getString("label"))
         assertEquals("polygon", sh.getString("shape_type"))
-        assertNull(sh.opt("group_id")?.takeIf { it != JSONObject.NULL })
+        // sequential 1-based group ids (stable shape identity)
+        assertEquals(1, sh.getInt("group_id"))
         // world (400,300) on a 2000×1600 letterbox: s = min(0.4, 0.375) = 0.375
         // dx = (800 - 2000*0.375)/2 = 25, dy = 0 → real = (400-25)/0.375 = 1000
         assertEquals(1000.0, sh.getJSONArray("points").getJSONArray(0).getDouble(0), 0.01)
@@ -82,6 +83,23 @@ class LabelMeCodecTest {
         assertEquals("HAND", shapes[0].label) // objects first
         assertEquals("CAMERA", shapes[1].label) // working mesh second
         assertEquals(3, shapes[0].points.size)
+    }
+
+    @Test
+    fun groupIdsAreSequentialPerShape() {
+        val im = com.testplaybyte.loom.domain.model.ProjectImage("im-1", "a.png", width = 800, height = 600)
+        val st = ImageState(
+            mesh = listOf(Pt(10f, 10f), Pt(50f, 10f), Pt(50f, 40f)),
+            objects = listOf(
+                ObjAnn("o1", null, listOf(Pt(0f, 0f), Pt(5f, 0f), Pt(5f, 5f))),
+                ObjAnn("o2", null, listOf(Pt(20f, 0f), Pt(25f, 0f), Pt(25f, 5f))),
+            ),
+        )
+        val root = JSONObject(LabelMeCodec.encode(project(listOf(im)), im, st, imageBytes = null))
+        val shapes = root.getJSONArray("shapes")
+        assertEquals(1, shapes.getJSONObject(0).getInt("group_id"))
+        assertEquals(2, shapes.getJSONObject(1).getInt("group_id"))
+        assertEquals(3, shapes.getJSONObject(2).getInt("group_id"))
     }
 
     @Test

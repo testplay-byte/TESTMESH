@@ -232,8 +232,17 @@ class LoomRepository(
                 if (slug != wanted) {
                     toast("A folder named \u201C${wanted.substringAfterLast('/')}\u201D already exists — created \u201C${slug.substringAfterLast('/')}\u201D")
                 }
+                // Re-creating a deleted project must UN-dismiss its slug:
+                // deleteProject dismisses the folder forever, and without
+                // this the new project vanished on the next rescan ("that
+                // project no longer exists" with the folder right there).
+                if (slug in dismissed || "$prefix$base" in dismissed) {
+                    dismissed = dismissed - slug - "$prefix$base"
+                    prefs.removeDismissed(slug)
+                    prefs.removeDismissed("$prefix$base")
+                }
                 val labels = labelNames.take(LoomRules.LABEL_MAX).mapIndexed { i, n ->
-                    Label(Ids.uid("lb"), n, "c${(i % 8) + 1}")
+                    Label(Ids.uid("lb"), n, LoomRules.classToken(i))
                 }
                 val now = System.currentTimeMillis()
                 val images = sceneIds.map { sid ->
@@ -342,7 +351,7 @@ class LoomRepository(
                 p.labels.size >= LoomRules.LABEL_MAX -> return@withLock "Label limit reached"
                 LoomRules.isDuplicate(p.labels.map { it.name }, name) -> return@withLock "Label already exists"
             }
-            val label = Label(Ids.uid("lb"), name, "c${(p.labels.size % 8) + 1}")
+            val label = Label(Ids.uid("lb"), name, LoomRules.classToken(p.labels.size))
             val next = touch(p.copy(labels = p.labels + label))
             writeProjectFolder(next, renderMissingImages = false)
             replaceInMemory(next)
@@ -724,7 +733,7 @@ class LoomRepository(
                 if (project.labels.isEmpty() && decoded.classes.isNotEmpty()) {
                     project = project.copy(
                         labels = decoded.classes.mapIndexed { i, c ->
-                            Label(c.id ?: "lb-$i", c.name, c.color.ifEmpty { "c${(i % 8) + 1}" })
+                            Label(c.id ?: "lb-$i", c.name, c.color.ifEmpty { LoomRules.classToken(i) })
                         },
                     )
                 }
@@ -820,7 +829,7 @@ class LoomRepository(
     private fun adoptFromAnnotations(folder: String, annText: String): Project {
         val decoded = runCatching { LoomJsonCodec.decode(annText) }.getOrNull()
         val labels = decoded?.classes?.mapIndexed { i, c ->
-            Label(c.id ?: "lb-$i", c.name, c.color.ifEmpty { "c${(i % 8) + 1}" })
+            Label(c.id ?: "lb-$i", c.name, c.color.ifEmpty { LoomRules.classToken(i) })
         } ?: emptyList()
         val images = decoded?.images?.mapIndexed { i, d ->
             ProjectImage("im-$folder-$i", d.file, width = d.width, height = d.height)
@@ -875,7 +884,7 @@ class LoomRepository(
     private suspend fun seedDemoProject() {
         val labelSpecs = listOf(
             "lb-fruit" to ("Fruit" to "c2"),
-            "lb-vehicle" to ("Vehicle" to "c1"),
+            "lb-vehicle" to ("Vehicle" to "c7"),
             "lb-tool" to ("Tool" to "c3"),
             "lb-plant" to ("Plant" to "c5"),
             "lb-animal" to ("Animal" to "c4"),

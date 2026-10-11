@@ -21,7 +21,7 @@ import org.json.JSONObject
  *     { "version": "5.11.4", "flags": {},
  *       "shapes": [ { "label": "CAMERA",
  *                     "points": [[x, y], ...],      // REAL image pixels
- *                     "group_id": null, "description": "",
+ *                     "group_id": 1, "description": "",
  *                     "shape_type": "polygon", "flags": {}, "mask": null } ],
  *       "imagePath": "camera-image.webp",
  *       "imageData": "<base64, optional>",
@@ -56,14 +56,17 @@ object LabelMeCodec {
         root.put("version", VERSION)
         root.put("flags", JSONObject())
         val shapes = JSONArray()
-        for (obj in state.objects + listOfNotNull(workingObj(state))) {
+        val allObjs = state.objects + listOfNotNull(workingObj(state))
+        allObjs.forEachIndexed { si, obj ->
             val isWorking = obj.id == "working"
             val labelName = project.labels.firstOrNull { it.id == obj.labelId }?.name ?: "unlabeled"
             shapes.put(
                 JSONObject().apply {
                     put("label", labelName)
                     put("points", pointsArray(DatasetWriters.realPoints(obj.mesh, image.width, image.height)))
-                    put("group_id", JSONObject.NULL)
+                    // sequential 1-based group id per shape (stable shape
+                    // identity in LabelMe tooling — never a mixed null/id set)
+                    put("group_id", si + 1)
                     // mark our in-progress shape so adoption restores it to
                     // the working mesh instead of duplicating it as an object
                     put("description", if (isWorking) "working" else "")

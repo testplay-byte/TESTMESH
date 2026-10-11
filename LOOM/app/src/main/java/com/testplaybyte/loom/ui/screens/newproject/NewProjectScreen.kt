@@ -138,7 +138,7 @@ fun NewProjectScreen(
                     labels.forEachIndexed { i, l ->
                         LabelChip(
                             name = l,
-                            colorToken = "c${(i % 8) + 1}",
+                            colorToken = LoomRules.classToken(i),
                             active = false,
                             onRemove = { labels.remove(l) },
                         )

@@ -90,12 +90,14 @@ import com.testplaybyte.loom.ui.components.LoomStepper
 import com.testplaybyte.loom.ui.components.ProjectImageArt
 import com.testplaybyte.loom.ui.components.StatusDot
 import com.testplaybyte.loom.ui.icons.IconAlert
+import com.testplaybyte.loom.ui.icons.IconArrowRight
 import com.testplaybyte.loom.ui.icons.IconBrush
 import com.testplaybyte.loom.ui.icons.IconCheck
 import com.testplaybyte.loom.ui.icons.IconChevronLeft
 import com.testplaybyte.loom.ui.icons.IconClose
 import com.testplaybyte.loom.ui.icons.IconDotMinus
 import com.testplaybyte.loom.ui.icons.IconDotPlus
+import com.testplaybyte.loom.ui.icons.IconDrawMesh
 import com.testplaybyte.loom.ui.icons.IconEraser
 import com.testplaybyte.loom.ui.icons.IconFit
 import com.testplaybyte.loom.ui.icons.IconHelp
@@ -105,8 +107,8 @@ import com.testplaybyte.loom.ui.icons.IconPan
 import com.testplaybyte.loom.ui.icons.IconPlus
 import com.testplaybyte.loom.ui.icons.IconRedo
 import com.testplaybyte.loom.ui.icons.IconReset
-import com.testplaybyte.loom.ui.icons.IconSave
 import com.testplaybyte.loom.ui.icons.IconSettings
+import com.testplaybyte.loom.ui.icons.IconSparkles
 import com.testplaybyte.loom.ui.icons.IconTag
 import com.testplaybyte.loom.ui.icons.IconUndo
 import com.testplaybyte.loom.ui.icons.IconZoomIn
@@ -206,6 +208,104 @@ fun AnnotateScreen(
     var tagsOpen by remember { mutableStateOf(false) }
     var objOpen by remember { mutableStateOf(false) }
     var tagDraft by remember { mutableStateOf("") }
+    var classDraft by remember { mutableStateOf("") }
+
+    // The saved object currently REOPENED for re-edit (null while
+    // annotating a fresh one) + its position, so saving puts it back in
+    // place. Drives the dirty check: without changes, tapping another
+    // object must NOT demand a save.
+    var workingObj by remember { mutableStateOf<ObjAnn?>(null) }
+    var workingObjIndex by remember { mutableIntStateOf(-1) }
+
+    val workingDirty: Boolean = state.mesh != null &&
+        (
+            workingObj == null ||
+                workingObj!!.mesh != state.present.mesh ||
+                workingObj!!.labelId != state.present.labelId ||
+                workingObj!!.density != state.present.density
+            )
+
+    /** Pulls a saved object back into the working mesh for re-editing. */
+    fun reopenObject(obj: ObjAnn) {
+        workingObjIndex = state.present.objects.indexOfFirst { it.id == obj.id }
+        state.commit { prev ->
+            prev.copy(
+                objects = prev.objects.filter { it.id != obj.id },
+                mesh = obj.mesh,
+                density = obj.density,
+                labelId = obj.labelId,
+                dots = emptyList(),
+                strokes = emptyList(),
+            )
+        }
+        state.denseRing = null
+        state.meshGen++
+        state.selection = null
+        workingObj = obj
+    }
+
+    /** Reopen-path switch: the untouched working object goes back (in its
+     *  original slot), the tapped one opens — no save demanded (owner req). */
+    fun switchToObject(target: ObjAnn) {
+        val orig = workingObj
+        val origIdx = workingObjIndex
+        state.commit { prev ->
+            val objs = prev.objects.toMutableList()
+            if (orig != null) objs.add(origIdx.coerceIn(0, objs.size), orig)
+            val tIdx = objs.indexOfFirst { it.id == target.id }
+            objs.removeAt(if (tIdx >= 0) tIdx else objs.lastIndex.coerceAtLeast(0))
+            // reopening at the REMOVAL slot keeps the saved order stable
+            workingObjIndex = if (tIdx >= 0) tIdx else objs.size
+            prev.copy(
+                objects = objs,
+                mesh = target.mesh,
+                density = target.density,
+                labelId = target.labelId,
+                dots = emptyList(),
+                strokes = emptyList(),
+            )
+        }
+        state.denseRing = null
+        state.meshGen++
+        state.selection = null
+        workingObj = target
+    }
+
+    /** Save object: appends a fresh ObjAnn or updates the reopened one
+     *  IN PLACE (original order preserved). */
+    fun saveWorkingObject() {
+        val m = state.mesh ?: return
+        val cur = workingObj
+        val idx = workingObjIndex
+        state.commit { prev ->
+            val obj = ObjAnn(cur?.id ?: Ids.uid("obj"), prev.labelId, m, prev.density)
+            val objs = prev.objects.toMutableList()
+            objs.add(idx.coerceIn(0, objs.size), obj)
+            prev.copy(
+                objects = objs,
+                mesh = null,
+                dots = emptyList(),
+                strokes = emptyList(),
+                labelId = null,
+            )
+        }
+        workingObj = null
+        workingObjIndex = -1
+    }
+
+    /** The state to persist: an UNTOUCHED reopened object folds back into
+     *  `objects` (it was never really being edited); a touched one stays
+     *  the working mesh (restored by the LabelMe "working" marker). */
+    fun foldedForSave(): ImageState {
+        val orig = workingObj ?: return state.present
+        val st = state.present
+        if (st.mesh == null) return st
+        val dirty = orig.mesh != st.mesh || orig.labelId != st.labelId
+        if (dirty) return st
+        val objs = st.objects.toMutableList()
+        objs.add(workingObjIndex.coerceIn(0, objs.size), orig)
+        return st.copy(objects = objs, mesh = null, labelId = null)
+    }
 
     // Real photo decode (demo scenes draw their vector art instead).
     val photo: ImageBitmap? by produceState<ImageBitmap?>(null, image.id) {
@@ -250,6 +350,8 @@ fun AnnotateScreen(
         if (loadedImageId != null && loadedImageId != image.id) {
             vm.repository.saveImageState(project.id, loadedImageId!!, state.present)
         }
+        workingObj = null
+        workingObjIndex = -1
         state.reset(project.stateOf(image.id))
         loadedImageId = image.id
         lastSig[0] = sigOf(state.present)
@@ -409,7 +511,7 @@ fun AnnotateScreen(
     // ── exit flush ───────────────────────────────────────────────────────
     fun flushAndExit() {
         scope.launch {
-            vm.repository.saveImageState(project.id, image.id, state.present)
+            vm.repository.saveImageState(project.id, image.id, foldedForSave())
             if (state.present.objects.isNotEmpty() || state.present.mesh != null) {
                 vm.repository.setImageStatus(project.id, image.id, ImageStatus.DONE)
             }
@@ -487,6 +589,10 @@ fun AnnotateScreen(
                 state.densityDraft = null
                 state.denseRing = null
                 state.sculpting = false
+                // history rewrote the state behind the reopened object —
+                // drop the reopen link or Save would corrupt another object
+                workingObj = null
+                workingObjIndex = -1
                 state.undo()
                 suppressAuto = sigOf(state.present) != lastSig[0]
             }, enabled = state.canUndo)
@@ -494,6 +600,8 @@ fun AnnotateScreen(
                 state.densityDraft = null
                 state.denseRing = null
                 state.sculpting = false
+                workingObj = null
+                workingObjIndex = -1
                 state.redo()
                 suppressAuto = sigOf(state.present) != lastSig[0]
             }, enabled = state.canRedo)
@@ -513,6 +621,7 @@ fun AnnotateScreen(
             ToolButton(Tool.DOT_POS, IconDotPlus, "Add positive dots", state, Modifier.weight(1f))
             ToolButton(Tool.DOT_NEG, IconDotMinus, "Add negative dots", state, Modifier.weight(1f))
             ToolButton(Tool.BRUSH, IconBrush, "Object brush", state, Modifier.weight(1f))
+            ToolButton(Tool.DRAW, IconDrawMesh, "Draw mesh freehand", state, Modifier.weight(1f))
             ToolButton(Tool.EDIT, IconNodes, "Edit mesh vertices", state, Modifier.weight(1f))
             ToolButton(Tool.ERASER, IconEraser, "Eraser", state, Modifier.weight(1f))
         }
@@ -563,9 +672,9 @@ fun AnnotateScreen(
             )
             }
 
-            // status pill (TOP-CENTER, clear of the corner loupe):
-            // animated "Magic Touch…" with elapsed seconds + cancel while
-            // segmenting; "N obj · M pts" once a mesh exists
+            // status pill (TOP-END — clear of the work area, owner req):
+            // animated "Magic Touch…" (spinning sparkles + elapsed seconds
+            // + cancel) while segmenting; "N obj · M pts" once a mesh exists
             val meshSize = state.mesh?.size ?: 0
             if (state.sculpting || state.mesh != null || state.objects.isNotEmpty()) {
                 val dotAnim = rememberInfiniteTransition(label = "pill")
@@ -575,17 +684,34 @@ fun AnnotateScreen(
                     animationSpec = infiniteRepeatable(tween(900, easing = androidx.compose.animation.core.LinearEasing)),
                     label = "pillDots",
                 )
+                val spin by dotAnim.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 360f,
+                    animationSpec = infiniteRepeatable(tween(1400, easing = androidx.compose.animation.core.LinearEasing)),
+                    label = "pillSpin",
+                )
                 val dots = dotF.toInt().coerceIn(0, 3)
                 Row(
                     modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 10.dp)
+                        .align(Alignment.TopEnd)
+                        .padding(top = 10.dp, end = 10.dp)
                         .clip(CircleShape)
                         .background(c.surface1.copy(alpha = 0.9f))
                         .border(1.dp, if (state.sculpting) c.mesh.copy(alpha = 0.55f) else c.hairline, CircleShape)
                         .padding(horizontal = 9.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    if (state.sculpting) {
+                        Icon(
+                            IconSparkles,
+                            contentDescription = null,
+                            tint = c.primary,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .graphicsLayer { rotationZ = spin },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
                     Text(
                         text = if (state.sculpting) {
                             "Magic Touch" + ".".repeat(dots) + if (sculptSecs >= 2) " ${sculptSecs}s" else ""
@@ -660,10 +786,11 @@ fun AnnotateScreen(
                 }
             }
 
-            // zoom chip (bottom-START — Save & next owns the bottom-right)
+            // zoom chip (bottom-END — owner req; the bottom dock below
+            // holds Save & next, so nothing competes here)
             Row(
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
+                    .align(Alignment.BottomEnd)
                     .padding(10.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(c.surface1.copy(alpha = 0.92f))
@@ -713,13 +840,16 @@ fun AnnotateScreen(
                         val lbl = project.labels.firstOrNull { it.id == obj.labelId }
                         LabelChip(
                             name = lbl?.name ?: "Object",
-                            colorToken = lbl?.color ?: "c1",
+                            colorToken = lbl?.color ?: "c2",
                             active = false,
                             onClick = {
-                                if (state.mesh != null) {
-                                    vm.toast("Save or remove the current object first", ToastIcon.WARN)
-                                } else {
-                                    reopenObject(state, obj.id)
+                                when {
+                                    // never delete on tap; demand a save only
+                                    // when the working object actually changed
+                                    state.mesh != null && workingDirty ->
+                                        vm.toast("Save or remove the current object first", ToastIcon.WARN)
+                                    state.mesh != null -> switchToObject(obj)
+                                    else -> reopenObject(obj)
                                 }
                             },
                         )
@@ -741,13 +871,6 @@ fun AnnotateScreen(
                             )
                         }
                         LoomIconButton(IconSettings, "Configure object", { objOpen = true }, size = 36.dp, iconSize = 16.dp)
-                    }
-                    if (state.mesh == null && state.objects.isNotEmpty()) {
-                        LoomChip(
-                            label = "＋ Add another object",
-                            icon = IconPlus,
-                            onClick = { state.tool = Tool.DOT_POS },
-                        )
                     }
                 }
             }
@@ -797,28 +920,36 @@ fun AnnotateScreen(
                     label = null,
                 )
                 Spacer(Modifier.weight(1f))
+                if (state.mesh == null && state.objects.isNotEmpty()) {
+                    // the dedicated START of the next annotation — a real
+                    // button, not a hidden chip (owner req)
+                    LoomButton(
+                        onClick = {
+                            state.tool = Tool.DOT_POS
+                            state.selection = null
+                            pulseNow()
+                        },
+                        size = LoomButtonSize.SM,
+                        variant = LoomButtonVariant.TONAL,
+                        icon = IconPlus,
+                        label = "New object",
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
                 if (state.mesh != null) {
                     LoomButton(
                         onClick = {
-                            if (project.labels.isEmpty()) {
-                                vm.toast("Add a class on the project screen first", ToastIcon.WARN)
-                                return@LoomButton
-                            }
                             if (state.present.labelId == null) {
                                 // never save with an implicit class — ask
+                                // (classes can be added right in the sheet)
                                 objOpen = true
                                 return@LoomButton
                             }
-                            state.commit { prev ->
-                                val m = prev.mesh ?: return@commit prev
-                                prev.copy(
-                                    objects = prev.objects + ObjAnn(Ids.uid("obj"), prev.labelId, m, prev.density),
-                                    mesh = null,
-                                    dots = emptyList(),
-                                    strokes = emptyList(),
-                                    labelId = null,
-                                )
+                            if (!workingDirty) {
+                                vm.toast("No changes — object already saved", ToastIcon.INFO)
+                                return@LoomButton
                             }
+                            saveWorkingObject()
                             state.denseRing = null
                             state.meshGen++
                             state.selection = null
@@ -827,7 +958,8 @@ fun AnnotateScreen(
                             vm.toast("Object saved — add the next one", ToastIcon.CHECK)
                         },
                         size = LoomButtonSize.SM,
-                        variant = LoomButtonVariant.TONAL,
+                        // highlighted only when there are real changes
+                        variant = if (workingDirty) LoomButtonVariant.PRIMARY else LoomButtonVariant.TONAL,
                         icon = IconCheck,
                         label = "Save object",
                     )
@@ -836,7 +968,7 @@ fun AnnotateScreen(
                 LoomButton(
                     onClick = {
                         scope.launch {
-                            vm.repository.saveImageState(project.id, image.id, state.present, embedImage = true)
+                            vm.repository.saveImageState(project.id, image.id, foldedForSave(), embedImage = true)
                             vm.repository.setImageStatus(project.id, image.id, ImageStatus.DONE)
                             pulseNow()
                             val next = index + 1
@@ -849,8 +981,7 @@ fun AnnotateScreen(
                             }
                         }
                     },
-                    size = LoomButtonSize.SM,
-                    icon = IconSave,
+                    icon = IconArrowRight,
                     label = "Save & next",
                 )
             }
@@ -863,7 +994,7 @@ fun AnnotateScreen(
                 onSelect = { i ->
                     if (i != index) {
                         scope.launch {
-                            vm.repository.saveImageState(project.id, image.id, state.present, embedImage = true)
+                            vm.repository.saveImageState(project.id, image.id, foldedForSave(), embedImage = true)
                             index = i
                         }
                     }
@@ -874,11 +1005,12 @@ fun AnnotateScreen(
 
     // ── sheets ───────────────────────────────────────────────────────────
     LoomSheet(open = helpOpen, onClose = { helpOpen = false }, title = "Canvas guide") {
-        GuideRow(IconDotPlus, "Prompt dots & Magic Touch", "+ dots mark what to include, − dots what to avoid. On photos the Magic Touch model turns them into a precise mask; the mesh then hugs the object.")
+        GuideRow(IconDotPlus, "Prompt dots & Magic Touch", "+ dots mark what to include, − dots what to avoid. On photos the Magic Touch model turns them into a precise mask; the mesh then hugs the object. Dots stay their on-screen size at any zoom and hide while you work on the mesh.")
         GuideRow(IconMesh, "Auto mesh & density", "The mesh rebuilds itself ~1s after each change. Density sets its vertex count — the smart mask picks the optimal count automatically, and the stepper re-fits from the full mask shape.")
-        GuideRow(IconSettings, "Object label", "Once a mesh exists the object bar rises in with the object it belongs to — tap the object chip or the gear to edit the mesh: pick its class, tune density, check the vertex count, remove it.")
-        GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe parks in the corner. Tap an edge midpoint to add one; select a vertex and use Delete to remove it.")
-        GuideRow(IconBrush, "Brush & eraser", "On photos, paint around an object to SELECT it (strokes turn into mask). On scene images the brush excludes an area. The eraser removes strokes.")
+        GuideRow(IconDrawMesh, "Draw mesh freehand", "Trace around an object with your finger — vertices drop onto the path automatically, dense where you curve and sparse on straight runs. The path closes itself on release.")
+        GuideRow(IconSettings, "Object label", "Save object asks for a class — pick one or type a new name right there. The amber mesh means \"not named yet\"; saved objects wear their class color.")
+        GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe parks in the corner. Tap an edge midpoint twice to add one; select a vertex and use Delete to remove it.")
+        GuideRow(IconBrush, "Brush & eraser", "On photos, paint a thin line over an object to SELECT it (the stroke feeds Magic Touch, like Edge Gallery). On scene images the brush excludes an area. The eraser removes strokes.")
         GuideRow(IconTag, "Image tags", "Flag the image itself — Blurry, Occluded, Low light or your own. Tags sit in the top bar, ride with the annotations and export with the dataset.")
         GuideRow(IconPan, "Gestures", "Pan with one finger, pinch to zoom 50–1000%, double-tap for 2×. Undo and redo live in the top bar.")
     }
@@ -897,8 +1029,32 @@ fun AnnotateScreen(
                     clearOpen = false
                     state.sculpting = false
                     state.denseRing = null
+                    val orig = workingObj
                     state.commit { prev ->
-                        prev.copy(dots = emptyList(), mesh = null, strokes = emptyList(), status = ImageStatus.UNLABELED)
+                        if (orig != null) {
+                            // a reopened object lives ONLY as the working
+                            // mesh — restoring it beats silently destroying it
+                            val objs = prev.objects.toMutableList()
+                            objs.add(workingObjIndex.coerceIn(0, objs.size), orig)
+                            prev.copy(
+                                objects = objs,
+                                dots = emptyList(),
+                                mesh = null,
+                                strokes = emptyList(),
+                                labelId = null,
+                                status = ImageStatus.UNLABELED,
+                            )
+                        } else {
+                            prev.copy(
+                                dots = emptyList(), mesh = null, strokes = emptyList(),
+                                status = ImageStatus.UNLABELED,
+                            )
+                        }
+                    }
+                    if (orig != null) {
+                        workingObj = null
+                        workingObjIndex = -1
+                        vm.toast("Object restored", ToastIcon.CHECK)
                     }
                     suppressAuto = sigOf(state.present) != lastSig[0]
                     pulseNow()
@@ -985,28 +1141,64 @@ fun AnnotateScreen(
 
     LoomSheet(open = objOpen, onClose = { objOpen = false }, title = "Object") {
         Text("CLASS", style = loomType.sectionLabel, color = c.textMuted)
-        if (project.labels.isEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            Text("No labels yet — add classes on the project screen first.", style = loomType.small, color = c.textMuted)
-        } else {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.padding(vertical = 8.dp),
-            ) {
-                project.labels.forEach { l ->
-                    LabelChip(
-                        name = l.name,
-                        colorToken = l.color,
-                        active = state.present.labelId == l.id,
-                        onClick = {
-                            if (state.present.labelId != l.id) {
-                                state.commit { prev -> prev.copy(labelId = l.id) }
-                            }
-                        },
-                    )
-                }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(vertical = 8.dp),
+        ) {
+            project.labels.forEach { l ->
+                LabelChip(
+                    name = l.name,
+                    colorToken = l.color,
+                    active = state.present.labelId == l.id,
+                    onClick = {
+                        if (state.present.labelId != l.id) {
+                            state.commit { prev -> prev.copy(labelId = l.id) }
+                        }
+                        // picking a class closes the sheet (owner req)
+                        objOpen = false
+                    },
+                )
             }
+        }
+        // add a brand-new class right here — no trip to the project screen
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(vertical = 4.dp),
+        ) {
+            LoomInput(
+                value = classDraft,
+                onValueChange = { classDraft = it },
+                placeholder = "New class name",
+                maxLength = LoomRules.LABEL_NAME_MAX,
+                modifier = Modifier.weight(1f),
+            )
+            LoomButton(
+                onClick = {
+                    val name = LoomRules.cleanLabelName(classDraft)
+                    if (name.isEmpty()) return@LoomButton
+                    scope.launch {
+                        val err = vm.repository.addLabel(project.id, name)
+                        if (err != null) {
+                            vm.toast(err, ToastIcon.WARN)
+                        } else {
+                            classDraft = ""
+                            vm.toast("Class added", ToastIcon.CHECK)
+                            // auto-select it for the object being saved
+                            val lbl = vm.projects.value
+                                .find { it.id == project.id }?.labels
+                                ?.firstOrNull { it.name.equals(name, ignoreCase = true) }
+                            if (lbl != null && state.present.labelId != lbl.id) {
+                                state.commit { prev -> prev.copy(labelId = lbl.id) }
+                            }
+                            objOpen = false
+                        }
+                    }
+                },
+                size = LoomButtonSize.SM,
+                label = "Add",
+            )
         }
         Text("MESH DENSITY", style = loomType.sectionLabel, color = c.textMuted)
         Spacer(Modifier.height(8.dp))
@@ -1044,15 +1236,36 @@ fun AnnotateScreen(
                 objOpen = false
                 suppressAuto = sigOf(state.present) != lastSig[0]
                 state.sculpting = false
-                state.commit { prev -> prev.copy(mesh = null) }
+                val orig = workingObj
+                if (orig != null) {
+                    // the mesh being "removed" IS a saved object — restore
+                    // it instead of destroying it
+                    val idx = workingObjIndex
+                    state.commit { prev ->
+                        val objs = prev.objects.toMutableList()
+                        objs.add(idx.coerceIn(0, objs.size), orig)
+                        prev.copy(
+                            objects = objs,
+                            mesh = null,
+                            dots = emptyList(),
+                            strokes = emptyList(),
+                            labelId = null,
+                        )
+                    }
+                    workingObj = null
+                    workingObjIndex = -1
+                    vm.toast("Object restored", ToastIcon.CHECK)
+                } else {
+                    state.commit { prev -> prev.copy(mesh = null) }
+                    vm.toast("Mesh removed — dots kept", ToastIcon.CHECK)
+                }
                 state.selection = null
                 pulseNow()
-                vm.toast("Mesh removed — dots kept", ToastIcon.CHECK)
             },
             size = LoomButtonSize.SM,
             variant = LoomButtonVariant.DANGER,
             icon = IconMesh,
-            label = "Remove mesh",
+            label = if (workingObj != null) "Restore saved object" else "Remove mesh",
         )
         if (state.objects.isNotEmpty()) {
             Spacer(Modifier.height(14.dp))
@@ -1066,9 +1279,14 @@ fun AnnotateScreen(
                     val lbl = project.labels.firstOrNull { it.id == obj.labelId }
                     LabelChip(
                         name = lbl?.name ?: "Object",
-                        colorToken = lbl?.color ?: "c1",
+                        colorToken = lbl?.color ?: "c2",
                         active = false,
-                        onRemove = { deleteObject(state, obj.id) },
+                        onRemove = {
+                            state.commit { prev ->
+                                prev.copy(objects = prev.objects.filter { it.id != obj.id })
+                            }
+                            state.meshGen++
+                        },
                     )
                 }
             }
@@ -1079,30 +1297,6 @@ fun AnnotateScreen(
 // ── small pieces ──────────────────────────────────────────────────────────
 
 private fun fmt2(n: Int) = n.toString().padStart(2, '0')
-
-/** Pulls a saved object back into the working mesh for re-editing. */
-private fun reopenObject(state: AnnotateState, objId: String) {
-    val obj = state.present.objects.firstOrNull { it.id == objId } ?: return
-    state.commit { prev ->
-        prev.copy(
-            objects = prev.objects.filter { it.id != objId },
-            mesh = obj.mesh,
-            density = obj.density,
-            labelId = obj.labelId,
-            dots = emptyList(),
-            strokes = emptyList(),
-        )
-    }
-    state.denseRing = null
-    state.meshGen++
-    state.selection = null
-}
-
-/** Deletes a saved object outright. */
-private fun deleteObject(state: AnnotateState, objId: String) {
-    state.commit { prev -> prev.copy(objects = prev.objects.filter { it.id != objId }) }
-    state.meshGen++
-}
 
 private fun targetName(project: com.testplaybyte.loom.domain.model.Project, imageId: String): String =
     project.labels.firstOrNull { it.id == project.stateOf(imageId).labelId }?.name ?: "—"

@@ -89,7 +89,7 @@ object ProjectMetaCodec {
                 Label(
                     id = o.optString("id", "lb-$i"),
                     name = name,
-                    color = o.optString("color", "c${(i % 8) + 1}"),
+                    color = o.optString("color", "").ifEmpty { LoomRules.classToken(i) },
                 ),
             )
         }

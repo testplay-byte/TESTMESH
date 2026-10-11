@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -395,11 +396,16 @@ fun LoomStepper(
 }
 
 /**
- * Stepper button with press-and-hold acceleration: the step fires on
- * PRESS; holding past 380ms starts an auto-repeat whose interval shrinks
- * every tick (250ms → 60ms floor, ×0.88) so walking 10→200 takes seconds.
- * Release cancels. The repeat reads the LATEST value/onChange through
- * [onStep] each tick (the caller's lambda closes over the composition).
+ * Stepper button with press-and-hold acceleration.
+ *
+ * A quick tap steps EXACTLY once — the step fires from the click itself,
+ * never from the press state: a fast tap can complete press+release
+ * between frames, so `collectIsPressedAsState` may never observe it
+ * (that was the "tapping + does nothing" device bug). Only a hold past
+ * 340ms engages the auto-repeat, whose interval shrinks every tick
+ * (150ms → 45ms floor, ×0.82) so walking 3→200 takes seconds. The repeat
+ * reads the LATEST value/onChange through [onStep] each tick (the
+ * caller's lambda closes over the composition).
  */
 @Composable
 private fun StepperHoldButton(
@@ -414,15 +420,19 @@ private fun StepperHoldButton(
     // the hold loop must read the LATEST onStep (value changes recompose
     // the caller's lambda while the effect keeps running)
     val step by rememberUpdatedState(onStep)
+    var repeating by remember { androidx.compose.runtime.mutableStateOf(false) }
     LaunchedEffect(pressed, enabled) {
-        if (!pressed || !enabled) return@LaunchedEffect
-        step()
-        var interval = 250f
-        delay(380)
+        if (!pressed || !enabled) {
+            repeating = false
+            return@LaunchedEffect
+        }
+        delay(340)
+        repeating = true
+        var interval = 150f
         while (true) {
             step()
             delay(interval.toLong())
-            interval = (interval * 0.88f).coerceAtLeast(60f)
+            interval = (interval * 0.82f).coerceAtLeast(45f)
         }
     }
     Box(
@@ -432,7 +442,11 @@ private fun StepperHoldButton(
             .background(c.surface2)
             .border(1.dp, c.hairlineStrong, CircleShape)
             .alpha(if (enabled) 1f else 0.35f)
-            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = {}),
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled) {
+                // a hold that engaged the repeat already stepped — the
+                // release click must not add one more
+                if (!repeating) step()
+            },
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = description, tint = c.text, modifier = Modifier.size(15.dp))

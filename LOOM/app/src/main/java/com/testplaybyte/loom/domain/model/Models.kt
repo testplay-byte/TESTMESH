@@ -263,6 +263,14 @@ object LoomRules {
     /** Train/val split percent clamp (0–40). */
     fun clampSplit(v: Int): Int = v.coerceIn(0, SPLIT_MAX)
 
+    /**
+     * Class-color token for the n-th label. c1 (amber) is RESERVED for the
+     * working / not-yet-named mesh, so labels cycle c2..c8 and no saved
+     * object is ever amber (owner requirement). With LABEL_MAX = 8 labels
+     * and 7 non-amber tokens, the 8th label reuses c2.
+     */
+    fun classToken(index: Int): String = "c${(index % 7) + 2}"
+
     /** World-space clamp for dots/vertices (0..800 / 0..600). */
     fun clampWorldX(x: Float): Float = x.coerceIn(0f, ProjectImage.WORLD_W.toFloat())
     fun clampWorldY(y: Float): Float = y.coerceIn(0f, ProjectImage.WORLD_H.toFloat())

@@ -26,8 +26,8 @@ android {
         // Spec: minSdk 26, target 35 (docs/06-android-guide.md §1).
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.7.0"
+        versionCode = 5
+        versionName = "0.8.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // arm64-v8a ONLY — the single device family in use across the repo
