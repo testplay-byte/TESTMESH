@@ -115,7 +115,9 @@ fun ProjectDetailScreen(
 
     // The folder is the database: refresh states/images whenever the screen
     // appears (files may have changed on disk).
-    LaunchedEffect(projectId) { vm.repository.rescan() }
+    // Opening a project re-reads ITS folder (hand-added images, edited
+    // sidecars) — targeted, not a whole-workspace scan.
+    LaunchedEffect(projectId) { projectId?.let { vm.repository.refreshProject(it) } }
 
     // Real photo picker (multi-select) → copy into the project folder.
     val photoPicker = rememberLauncherForActivityResult(

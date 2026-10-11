@@ -86,11 +86,12 @@ fun SplashScreen(
         // Advance shortly after the mark settles — no dead wait. The scale
         // settle runs CONCURRENTLY with the draw-on (no blank lead-in).
         progress.animateTo(1f, tween(1700, easing = androidx.compose.animation.core.LinearEasing))
-        while (!currentHydrated && System.currentTimeMillis() - start < 3000) delay(20)
+        // Hydration is now FAST (prefs only — the workspace scan runs in
+        // the background), so this rarely waits at all. The cap is a
+        // safety net: routing to the setup screen on a timeout was the
+        // "asks for setup every launch" device bug.
+        while (!currentHydrated && System.currentTimeMillis() - start < 8000) delay(20)
         delay(250)
-        advance()
-        // Safety net: never hold the splash longer than 3.2s under any path.
-        while (!advanced[0] && System.currentTimeMillis() - start < 3200) delay(30)
         advance()
     }
 

@@ -155,6 +155,9 @@ data class LoomSettings(
     val densityManual: Boolean = false,
     /** Loupe while dragging vertices. */
     val magnifier: Boolean = true,
+    /** Mesh highlight strength: 0 subtle · 1 normal · 2 bold (owner req:
+     *  adjustable fill/stroke emphasis of the highlight). */
+    val meshHighlight: Int = 1,
     /** Haptic feedback on commit actions. */
     val haptics: Boolean = true,
     /** Persist after every gesture. */

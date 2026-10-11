@@ -35,6 +35,7 @@ class LoomViewModel(private val app: LoomApp) : ViewModel() {
     val perms: StateFlow<Perms> = repository.perms
     val projects: StateFlow<List<Project>> = repository.projects
     val hydrated: StateFlow<Boolean> = repository.hydrated
+    val projectsLoaded: StateFlow<Boolean> = repository.projectsLoaded
     val workspacePath: StateFlow<String> = repository.workspacePath
 
     private val _toast = MutableStateFlow<ToastMsg?>(null)

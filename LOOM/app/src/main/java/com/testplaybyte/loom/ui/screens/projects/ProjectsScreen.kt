@@ -78,7 +78,12 @@ fun ProjectsScreen(
 ) {
     val c = loomColors
     val projects by vm.projects.collectAsState()
+    val projectsLoaded by vm.projectsLoaded.collectAsState()
     val workspacePath by vm.workspacePath.collectAsState()
+
+    // Detect folder changes (hand-added images, deleted folders, new
+    // datasets) every time the screen comes up — silently, in background.
+    LaunchedEffect(Unit) { vm.repository.rescan() }
     var deleteId by remember { mutableStateOf<String?>(null) }
     var deleteStage by remember { mutableStateOf(1) }
     val deleting = projects.find { it.id == deleteId }
@@ -86,8 +91,6 @@ fun ProjectsScreen(
 
     // Refresh from disk whenever the screen appears: images added by hand
     // or folders dropped into the workspace are detected here.
-    LaunchedEffect(Unit) { vm.repository.rescan() }
-
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             LoomScreenHeader(
@@ -107,7 +110,22 @@ fun ProjectsScreen(
                     .padding(top = 6.dp, bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (projects.isEmpty()) {
+                if (projects.isEmpty() && !projectsLoaded) {
+                    // the background workspace scan is still running —
+                    // NEVER show "no datasets" before it finished
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 48.dp),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Text(
+                            "Scanning your storage folder…",
+                            style = com.testplaybyte.loom.ui.theme.loomType.small,
+                            color = c.textMuted,
+                        )
+                    }
+                } else if (projects.isEmpty()) {
                     com.testplaybyte.loom.ui.components.LoomEmptyAction(
                         title = "No datasets yet",
                         sub = "Create a project to start annotating images and building your first dataset.",

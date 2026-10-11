@@ -97,14 +97,14 @@ val LoomDark = LoomColors(
     grid = Color(0xFFF0EBE1).copy(alpha = 0.055f),
     canvas = Color(0xFF100E0B),
     classColors = listOf(
-        Color(0xFFFFB224), // c1 amber
-        Color(0xFF5FD977), // c2 mint
-        Color(0xFFFF8A7A), // c3 coral
-        Color(0xFFD9C08A), // c4 sand
-        Color(0xFF8FBF6F), // c5 leaf
-        Color(0xFFC9935B), // c6 copper
-        Color(0xFFA8A06B), // c7 olive
-        Color(0xFFE0A9C2), // c8 rose
+        Color(0xFFFFB224), // c1 amber (RESERVED for the working mesh)
+        Color(0xFF5FD977), // c2 mint green
+        Color(0xFFFF8A7A), // c3 coral red
+        Color(0xFF6FB6FF), // c4 sky blue
+        Color(0xFFB69CFF), // c5 violet
+        Color(0xFF4FD0C4), // c6 teal
+        Color(0xFFE3C56B), // c7 gold
+        Color(0xFFE0A9C2), // c8 rose pink
     ),
 )
 
@@ -139,13 +139,13 @@ val LoomLight = LoomColors(
     grid = Color(0xFF26211A).copy(alpha = 0.06f),
     canvas = Color(0xFFDCD5C2),
     classColors = listOf(
-        Color(0xFF8A5B08), // c1 amber
-        Color(0xFF1E7C3A), // c2 mint
-        Color(0xFFB3342A), // c3 coral
-        Color(0xFF7A683D), // c4 sand
-        Color(0xFF4E7A33), // c5 leaf
-        Color(0xFF8F5B26), // c6 copper
-        Color(0xFF6B6636), // c7 olive
+        Color(0xFF8A5B08), // c1 amber (RESERVED for the working mesh)
+        Color(0xFF1E7C3A), // c2 green
+        Color(0xFFB3342A), // c3 red
+        Color(0xFF2E6DB4), // c4 blue
+        Color(0xFF6B4FB8), // c5 violet
+        Color(0xFF0E7C72), // c6 teal
+        Color(0xFF8A6D1F), // c7 gold
         Color(0xFFA84E74), // c8 rose
     ),
 )

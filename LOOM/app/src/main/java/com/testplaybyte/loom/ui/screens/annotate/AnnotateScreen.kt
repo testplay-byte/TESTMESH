@@ -241,6 +241,7 @@ fun AnnotateScreen(
         state.denseRing = null
         state.meshGen++
         state.selection = null
+        segContextStrokes.clear()
         workingObj = obj
     }
 
@@ -268,6 +269,7 @@ fun AnnotateScreen(
         state.denseRing = null
         state.meshGen++
         state.selection = null
+        segContextStrokes.clear()
         workingObj = target
     }
 
@@ -291,6 +293,7 @@ fun AnnotateScreen(
         }
         workingObj = null
         workingObjIndex = -1
+        segContextStrokes.clear()
     }
 
     /** The state to persist: an UNTOUCHED reopened object folds back into
@@ -305,6 +308,41 @@ fun AnnotateScreen(
         val objs = st.objects.toMutableList()
         objs.add(workingObjIndex.coerceIn(0, objs.size), orig)
         return st.copy(objects = objs, mesh = null, labelId = null)
+    }
+
+    /** Tapping the ALREADY-OPEN object's chip closes it — untouched, it
+     *  goes back into objects and the canvas shows everything again. */
+    fun closeWorkingObject() {
+        val orig = workingObj ?: return
+        val idx = workingObjIndex
+        state.commit { prev ->
+            val objs = prev.objects.toMutableList()
+            objs.add(idx.coerceIn(0, objs.size), orig)
+            prev.copy(
+                objects = objs,
+                mesh = null,
+                dots = emptyList(),
+                strokes = emptyList(),
+                labelId = null,
+            )
+        }
+        workingObj = null
+        workingObjIndex = -1
+        state.denseRing = null
+        state.meshGen++
+        state.selection = null
+        segContextStrokes.clear()
+    }
+
+    /**
+     * Chip captions: with several objects of one class they read
+     * "Hand 1", "Hand 2", "Hand 3" (owner req); a lone object keeps the
+     * plain class name.
+     */
+    fun chipCaption(obj: ObjAnn, ordinal: Int, totalForLabel: Int): String {
+        val lbl = project.labels.firstOrNull { it.id == obj.labelId }
+        val base = lbl?.name ?: "Object"
+        return if (totalForLabel > 1) "$base ${ordinal + 1}" else base
     }
 
     // Real photo decode (demo scenes draw their vector art instead).
@@ -342,16 +380,27 @@ fun AnnotateScreen(
     val segSig = remember { arrayOf<String?>(null) }       // signature the in-flight request was built from
     var suppressAuto by remember { mutableStateOf(false) }
 
+    /**
+     * Brush strokes already CONSUMED by the last segmentation, kept as
+     * context so later +/− dots REFINE the same selection instead of
+     * segmenting from the lone new dot (the "dots don't adjust after a
+     * brush" bug). Transient — reset whenever the object context changes.
+     */
+    val segContextStrokes = remember {
+        mutableListOf<com.testplaybyte.loom.domain.model.Stroke>()
+    }
+
     val promptSig = remember(state.present.dots, state.present.strokes) { sigOf(state.present) }
 
     // ── image load / switch: persist the previous, reset history ─────────
     var loadedImageId by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(image.id) {
         if (loadedImageId != null && loadedImageId != image.id) {
-            vm.repository.saveImageState(project.id, loadedImageId!!, state.present)
+            vm.repository.saveImageState(project.id, loadedImageId!!, foldedForSave())
         }
         workingObj = null
         workingObjIndex = -1
+        segContextStrokes.clear()
         state.reset(project.stateOf(image.id))
         loadedImageId = image.id
         lastSig[0] = sigOf(state.present)
@@ -425,7 +474,7 @@ fun AnnotateScreen(
             // 1-3s processing window can never be overwritten
             val presentAtRequest = state.present
             segSig[0] = sigAtRequest
-            val specs = buildSegSpecs(state.present, layout)
+            val specs = buildSegSpecs(state.present, layout, segContextStrokes)
             segRequest = segmenter.segment(
                 bmp.asAndroidBitmap(),
                 specs,
@@ -467,7 +516,14 @@ fun AnnotateScreen(
                                 ) to LoomRules.clampDensity(state.present.density)
                             }
                         }
+                        // the fit ran off-thread — anything (undo, clear, a
+                        // new prompt) may have landed in that window
+                        if (state.present != presentAtRequest) return@launch
                         state.denseRing = denseWorld
+                        // brush strokes used THIS round stay as segmentation
+                        // context (the +/− dots that follow must refine the
+                        // same selection, not start from scratch)
+                        segContextStrokes.addAll(state.present.strokes)
                         // fused with the prompt commit when armed: one Undo
                         // removes the dot AND the mask together
                         state.commitOrFuse { prev ->
@@ -593,6 +649,7 @@ fun AnnotateScreen(
                 // drop the reopen link or Save would corrupt another object
                 workingObj = null
                 workingObjIndex = -1
+                segContextStrokes.clear()
                 state.undo()
                 suppressAuto = sigOf(state.present) != lastSig[0]
             }, enabled = state.canUndo)
@@ -602,6 +659,7 @@ fun AnnotateScreen(
                 state.sculpting = false
                 workingObj = null
                 workingObjIndex = -1
+                segContextStrokes.clear()
                 state.redo()
                 suppressAuto = sigOf(state.present) != lastSig[0]
             }, enabled = state.canRedo)
@@ -657,6 +715,7 @@ fun AnnotateScreen(
                 state = state,
                 dotSizeWorld = settings.dotSize,
                 magnifier = settings.magnifier,
+                meshHighlight = settings.meshHighlight,
                 showHint = hintVisible,
                 onHintTap = { dismissHint() },
                 onWarn = { msg -> vm.toast(msg, ToastIcon.WARN) },
@@ -673,24 +732,17 @@ fun AnnotateScreen(
             }
 
             // status pill (TOP-END — clear of the work area, owner req):
-            // animated "Magic Touch…" (spinning sparkles + elapsed seconds
-            // + cancel) while segmenting; "N obj · M pts" once a mesh exists
+            // spinning sparkles + elapsed seconds + cancel while
+            // segmenting; "N obj · M pts" once a mesh exists
             val meshSize = state.mesh?.size ?: 0
             if (state.sculpting || state.mesh != null || state.objects.isNotEmpty()) {
                 val dotAnim = rememberInfiniteTransition(label = "pill")
-                val dotF by dotAnim.animateFloat(
-                    initialValue = 0f,
-                    targetValue = 4f,
-                    animationSpec = infiniteRepeatable(tween(900, easing = androidx.compose.animation.core.LinearEasing)),
-                    label = "pillDots",
-                )
                 val spin by dotAnim.animateFloat(
                     initialValue = 0f,
                     targetValue = 360f,
                     animationSpec = infiniteRepeatable(tween(1400, easing = androidx.compose.animation.core.LinearEasing)),
                     label = "pillSpin",
                 )
-                val dots = dotF.toInt().coerceIn(0, 3)
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -714,7 +766,7 @@ fun AnnotateScreen(
                     }
                     Text(
                         text = if (state.sculpting) {
-                            "Magic Touch" + ".".repeat(dots) + if (sculptSecs >= 2) " ${sculptSecs}s" else ""
+                            "Magic Touch" + if (sculptSecs >= 2) " · ${sculptSecs}s" else ""
                         } else {
                             buildString {
                                 if (state.objects.isNotEmpty()) append("${state.objects.size} obj")
@@ -749,6 +801,22 @@ fun AnnotateScreen(
                 }
             }
 
+            // DRAW tool: drawing only starts after this button — an
+            // accidental touch never begins a mesh (owner req)
+            if (state.tool == Tool.DRAW && !state.drawArmed) {
+                LoomButton(
+                    onClick = {
+                        state.drawArmed = true
+                        state.selection = null
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 56.dp),
+                    icon = IconDrawMesh,
+                    label = "Draw the mesh around an object",
+                )
+            }
+
             // Magic Touch failure recovery card (auto-clears on success)
             if (segFailed) {
                 LaunchedEffect(segFailed) {
@@ -758,7 +826,9 @@ fun AnnotateScreen(
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 56.dp)
+                        .padding(
+                            bottom = if (state.tool == Tool.DRAW && !state.drawArmed) 116.dp else 56.dp,
+                        )
                         .clip(RoundedCornerShape(12.dp))
                         .background(c.surface1.copy(alpha = 0.96f))
                         .border(1.dp, c.hairlineStrong, RoundedCornerShape(12.dp))
@@ -786,12 +856,12 @@ fun AnnotateScreen(
                 }
             }
 
-            // zoom chip (bottom-END — owner req; the bottom dock below
-            // holds Save & next, so nothing competes here)
+            // zoom chip (RIGHT side — owner req; vertically centered so
+            // the bottom corners stay free for the loupe)
             Row(
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(10.dp)
+                    .align(Alignment.CenterEnd)
+                    .padding(start = 10.dp, end = 4.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(c.surface1.copy(alpha = 0.92f))
                     .border(1.dp, c.hairline, RoundedCornerShape(10.dp))
@@ -836,14 +906,52 @@ fun AnnotateScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text("Objects", style = loomType.small, color = c.textMuted)
-                    state.objects.forEach { obj ->
-                        val lbl = project.labels.firstOrNull { it.id == obj.labelId }
+                    // the WORKING object renders in the loop too (at its
+                    // saved slot) so tapping its chip again closes it
+                    val displayObjs = run {
+                        val wo = workingObj
+                        if (wo != null && state.mesh != null) {
+                            val objs = state.objects.toMutableList()
+                            objs.add(workingObjIndex.coerceIn(0, objs.size), wo)
+                            objs
+                        } else {
+                            state.objects
+                        }
+                    }
+                    val perLabel = displayObjs
+                        .groupingBy { it.labelId }
+                        .eachCount()
+                    val seen = HashMap<String?, Int>()
+                    displayObjs.forEach { obj ->
+                        // the OPEN object follows the live label so a
+                        // re-class from the sheet updates its chip at once
+                        val liveLabelId = if (workingObj?.id == obj.id && state.mesh != null) {
+                            state.present.labelId
+                        } else {
+                            obj.labelId
+                        }
+                        val lbl = project.labels.firstOrNull { it.id == liveLabelId }
+                        val ordinal = seen.getOrPut(liveLabelId) { 0 }
+                        seen[liveLabelId] = ordinal + 1
+                        val isOpen = workingObj?.id == obj.id && state.mesh != null
                         LabelChip(
-                            name = lbl?.name ?: "Object",
+                            name = chipCaption(
+                                obj.copy(labelId = liveLabelId),
+                                ordinal,
+                                perLabel[liveLabelId] ?: 1,
+                            ),
                             colorToken = lbl?.color ?: "c2",
-                            active = false,
+                            active = isOpen,
                             onClick = {
                                 when {
+                                    // tapping the OPEN object's chip closes it
+                                    isOpen -> {
+                                        if (workingDirty) {
+                                            vm.toast("Save or remove the current object first", ToastIcon.WARN)
+                                        } else {
+                                            closeWorkingObject()
+                                        }
+                                    }
                                     // never delete on tap; demand a save only
                                     // when the working object actually changed
                                     state.mesh != null && workingDirty ->
@@ -854,16 +962,10 @@ fun AnnotateScreen(
                             },
                         )
                     }
-                    val curLabel = project.labels.firstOrNull { it.id == state.present.labelId }
+                    // the working object is already a chip in the loop
+                    // above; this only adds the affordances
                     if (state.mesh != null) {
-                        if (curLabel != null) {
-                            LabelChip(
-                                name = curLabel.name,
-                                colorToken = curLabel.color,
-                                active = true,
-                                onClick = { objOpen = true },
-                            )
-                        } else {
+                        if (state.present.labelId == null) {
                             LoomChip(
                                 label = "＋ Name this object",
                                 icon = IconPlus,
@@ -954,6 +1056,7 @@ fun AnnotateScreen(
                             state.meshGen++
                             state.selection = null
                             state.tool = Tool.DOT_POS
+                            segContextStrokes.clear()
                             pulseNow()
                             vm.toast("Object saved — add the next one", ToastIcon.CHECK)
                         },
@@ -973,6 +1076,11 @@ fun AnnotateScreen(
                             pulseNow()
                             val next = index + 1
                             if (next < project.images.size) {
+                                // drop the flush link BEFORE switching: the
+                                // image-load effect must not re-save the old
+                                // (draft) state over the DONE we just wrote
+                                loadedImageId = null
+                                segContextStrokes.clear()
                                 vm.toast("Saved", ToastIcon.SAVE)
                                 index = next
                             } else {
@@ -995,6 +1103,8 @@ fun AnnotateScreen(
                     if (i != index) {
                         scope.launch {
                             vm.repository.saveImageState(project.id, image.id, foldedForSave(), embedImage = true)
+                            loadedImageId = null
+                            segContextStrokes.clear()
                             index = i
                         }
                     }
@@ -1007,12 +1117,12 @@ fun AnnotateScreen(
     LoomSheet(open = helpOpen, onClose = { helpOpen = false }, title = "Canvas guide") {
         GuideRow(IconDotPlus, "Prompt dots & Magic Touch", "+ dots mark what to include, − dots what to avoid. On photos the Magic Touch model turns them into a precise mask; the mesh then hugs the object. Dots stay their on-screen size at any zoom and hide while you work on the mesh.")
         GuideRow(IconMesh, "Auto mesh & density", "The mesh rebuilds itself ~1s after each change. Density sets its vertex count — the smart mask picks the optimal count automatically, and the stepper re-fits from the full mask shape.")
-        GuideRow(IconDrawMesh, "Draw mesh freehand", "Trace around an object with your finger — vertices drop onto the path automatically, dense where you curve and sparse on straight runs. The path closes itself on release.")
+        GuideRow(IconDrawMesh, "Draw mesh freehand", "Press the button, then trace around an object with your finger — vertices preview onto the path as you go, dense where you curve and sparse on straight runs. The path closes itself on release; press the button again for the next one.")
         GuideRow(IconSettings, "Object label", "Save object asks for a class — pick one or type a new name right there. The amber mesh means \"not named yet\"; saved objects wear their class color.")
         GuideRow(IconNodes, "Edit vertices", "Drag a vertex — the loupe parks in the corner. Tap an edge midpoint twice to add one; select a vertex and use Delete to remove it.")
         GuideRow(IconBrush, "Brush & eraser", "On photos, paint a thin line over an object to SELECT it (the stroke feeds Magic Touch, like Edge Gallery). On scene images the brush excludes an area. The eraser removes strokes.")
         GuideRow(IconTag, "Image tags", "Flag the image itself — Blurry, Occluded, Low light or your own. Tags sit in the top bar, ride with the annotations and export with the dataset.")
-        GuideRow(IconPan, "Gestures", "Pan with one finger, pinch to zoom 50–1000%, double-tap for 2×. Undo and redo live in the top bar.")
+        GuideRow(IconPan, "Gestures", "Pan with one finger, pinch to zoom 50–2000%, double-tap for 2×. Undo and redo live in the top bar.")
     }
 
     LoomSheet(open = clearOpen, onClose = { clearOpen = false }, title = "Clear annotations?") {
@@ -1056,6 +1166,7 @@ fun AnnotateScreen(
                         workingObjIndex = -1
                         vm.toast("Object restored", ToastIcon.CHECK)
                     }
+                    segContextStrokes.clear()
                     suppressAuto = sigOf(state.present) != lastSig[0]
                     pulseNow()
                     vm.toast("Annotations cleared", ToastIcon.CHECK)
@@ -1254,9 +1365,11 @@ fun AnnotateScreen(
                     }
                     workingObj = null
                     workingObjIndex = -1
+                    segContextStrokes.clear()
                     vm.toast("Object restored", ToastIcon.CHECK)
                 } else {
                     state.commit { prev -> prev.copy(mesh = null) }
+                    segContextStrokes.clear()
                     vm.toast("Mesh removed — dots kept", ToastIcon.CHECK)
                 }
                 state.selection = null
@@ -1485,14 +1598,16 @@ private fun remeshForImage(
 }
 
 /**
- * Builds the Magic Touch stroke list from the persisted prompts:
- * + dots → POSITIVE strokes, − dots → NEGATIVE strokes, exclusion brush
- * strokes → NEGATIVE scribbles (thinned, capped). Coordinates convert
- * from world (800×600) into image pixels via [layout].
+ * Builds the Magic Touch stroke list from the persisted prompts PLUS the
+ * consumed-stroke context: + dots → POSITIVE strokes, − dots → NEGATIVE
+ * strokes, brush strokes (current + previously consumed) → POSITIVE
+ * scribbles (thinned, capped). Coordinates convert from world (800×600)
+ * into image pixels via [layout].
  */
 private fun buildSegSpecs(
     state: com.testplaybyte.loom.domain.model.ImageState,
     layout: PhotoLayout,
+    contextStrokes: List<com.testplaybyte.loom.domain.model.Stroke> = emptyList(),
 ): List<SmartSegmenter.Spec> {
     val specs = ArrayList<SmartSegmenter.Spec>()
     state.dots.forEach { d ->
@@ -1500,8 +1615,9 @@ private fun buildSegSpecs(
         specs.add(SmartSegmenter.Spec(listOf(ip), d.isPos))
     }
     // Brush strokes are POSITIVE on photos: drawing around an object
-    // SELECTS it (Edge Gallery semantics). They are consumed on success.
-    state.strokes.forEach { st ->
+    // SELECTS it (Edge Gallery semantics). They are consumed on success
+    // but kept as [contextStrokes] so later dots refine the same mask.
+    (state.strokes + contextStrokes).forEach { st ->
         val pts = st.pts.map { layout.worldToImage(it.x, it.y) }
         if (pts.isNotEmpty()) specs.add(SmartSegmenter.Spec(pts, positive = true))
     }

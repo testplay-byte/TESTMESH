@@ -27,6 +27,7 @@ import com.testplaybyte.loom.domain.model.ProjectImage
 import com.testplaybyte.loom.domain.model.ToastIcon
 import com.testplaybyte.loom.domain.model.ToastMsg
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -95,6 +97,16 @@ class LoomRepository(
     private val _projects = MutableStateFlow<List<Project>>(emptyList())
     val projects: StateFlow<List<Project>> = _projects.asStateFlow()
 
+    /**
+     * False until the FIRST workspace scan finishes. The projects list is
+     * deliberately loaded in the BACKGROUND (see [initialize]): on a slow
+     * device a full SAF scan takes many seconds, and gating the whole app
+     * on it made the splash time out into the setup screen and an empty
+     * project list.
+     */
+    private val _projectsLoaded = MutableStateFlow(false)
+    val projectsLoaded: StateFlow<Boolean> = _projectsLoaded.asStateFlow()
+
     private val _workspacePath = MutableStateFlow("")
     val workspacePath: StateFlow<String> = _workspacePath.asStateFlow()
 
@@ -105,9 +117,14 @@ class LoomRepository(
 
     private val io = Dispatchers.IO
     private val mutex = Mutex()
+
+    /** Bumped whenever the project list is authoritatively rewritten
+     *  (folder swap, clear-all, targeted refresh) — in-flight background
+     *  scans whose generation is stale must not merge their result. */
+    @Volatile private var scanGen = 0L
     private val appContextRef = appContext.applicationContext
     private var workspace: Workspace = FileWorkspace(File(appContext.filesDir, "workspace"))
-    private var dismissed: Set<String> = emptySet()
+    @Volatile private var dismissed: Set<String> = emptySet()
 
     fun toast(text: String, icon: ToastIcon = ToastIcon.INFO) {
         _toasts.tryEmit(ToastMsg(System.currentTimeMillis(), text, icon))
@@ -130,9 +147,15 @@ class LoomRepository(
     // ── initialize ────────────────────────────────────────────────────────
 
     /**
-     * Loads preferences, builds the workspace, scans every project folder
-     * and seeds the demo project on the true first run. Call once from the
-     * app scope; the UI gates on [hydrated].
+     * Loads preferences, builds the workspace and hydrates the app shell
+     * IMMEDIATELY; the project scan itself runs in the background and
+     * fills [projects] when done ([projectsLoaded] flips).
+     *
+     * The workspace folders ARE the database, but they live behind SAF —
+     * scanning every folder, meta file, annotation document and per-image
+     * sidecar takes seconds on a low-powered device, and holding the UI
+     * hostage to it caused the "asks for setup again" + "no projects"
+     * device bugs.
      */
     suspend fun initialize() {
         withContext(io) {
@@ -141,10 +164,51 @@ class LoomRepository(
             dismissed = prefs.currentDismissed()
             workspace = buildWorkspace(prefs.currentWorkspaceUri())
             _workspacePath.value = workspace.displayPath
-            _projects.value = scanProjects()
-            maybeSeed()
             _hydrated.value = true
         }
+        scanInBackground(initial = true)
+    }
+
+    /** Background project scan; never blocks an action or the UI. */
+    private fun scanInBackground(initial: Boolean) {
+        val gen = ++scanGen
+        CoroutineScope(io).launch {
+            val scanned = runCatching { scanProjects() }.getOrDefault(emptyList())
+            if (gen != scanGen) return@launch // workspace swapped meanwhile
+            if (initial && scanned.isEmpty() && _projects.value.isEmpty()) {
+                runCatching { maybeSeed() }
+            }
+            if (gen != scanGen) return@launch
+            _projects.value = mergeScan(scanned)
+            _projectsLoaded.value = true
+        }
+    }
+
+    /**
+     * Merges a fresh scan with the in-memory list so a scan that started
+     * BEFORE an action (a create during startup) can never erase it:
+     * in-memory projects missing from the scan survive.
+     */
+    private fun mergeScan(scanned: List<Project>): List<Project> {
+        // A scan that listed folders BEFORE a delete finished must not
+        // resurrect it; a scan that adopted the folder of a JUST-created
+        // project (its meta write was still in flight → adoption-shaped
+        // "pr-<slug>" id) must not replace the real project either.
+        val bySlug = scanned.filter { it.slug !in dismissed }.associateBy { it.slug }
+        val out = ArrayList<Project>()
+        val kept = HashSet<String>()
+        for (p in _projects.value) {
+            if (p.slug in dismissed) continue
+            val scannedP = bySlug[p.slug]
+            when {
+                scannedP == null -> out.add(p)
+                scannedP.id == p.id -> out.add(scannedP) // fresh scan of same project
+                else -> out.add(p)                       // keep the real one
+            }
+            kept.add(p.slug)
+        }
+        for ((slug, p) in bySlug) if (slug !in kept) out.add(p)
+        return out.sortedByDescending { it.updatedAt }
     }
 
     // ── permissions / folder ──────────────────────────────────────────────
@@ -173,6 +237,10 @@ class LoomRepository(
         prefs.updatePerms(next)
         workspace = buildWorkspace(uri)
         _workspacePath.value = workspace.displayPath
+        // the in-memory list belongs to the previous workspace — a merge
+        // would resurrect projects that live somewhere else now
+        scanGen++ // any in-flight scan is now stale
+        _projects.value = emptyList()
         rescanLocked()
         // The demo project may have been seeded into the app-private
         // fallback before a folder existed — offer it in the real folder too.
@@ -194,6 +262,7 @@ class LoomRepository(
 
     /** Clear-all (docs/03 §8): every project's app data, settings, perms. */
     suspend fun clearAllData() = withContext(io) {
+        scanGen++ // in-flight scans must not merge over the wipe
         mutex.withLock {
             for (p in _projects.value) removeProjectData(p, deleteIfPureDemo = true)
         }
@@ -484,7 +553,22 @@ class LoomRepository(
     }
 
     private fun rescanLocked() {
-        _projects.value = scanProjects()
+        _projects.value = mergeScan(scanProjects())
+        _projectsLoaded.value = true
+    }
+
+    /**
+     * Re-reads ONE project folder from disk and replaces it in memory —
+     * called when the user OPENS a project, so hand-added images and
+     * externally edited annotation files are picked up immediately.
+     */
+    suspend fun refreshProject(projectId: String) = withContext(io) {
+        scanGen++
+        mutex.withLock {
+            val p = _projects.value.firstOrNull { it.id == projectId } ?: return@withLock
+            val fresh = runCatching { loadProject(p.slug) }.getOrNull() ?: return@withLock
+            _projects.value = _projects.value.map { if (it.id == projectId) fresh else it }
+        }
     }
 
     // ── export ────────────────────────────────────────────────────────────

@@ -23,8 +23,9 @@ sealed interface Live {
     data class VertexLive(val index: Int, val pos: Pt) : Live
     data class DotLive(val id: String, val pos: Pt) : Live
     data class BrushLive(val pts: List<Pt>) : Live
-    /** Freehand DRAW-mesh path in flight (becomes the mesh on release). */
-    data class DrawLive(val pts: List<Pt>) : Live
+    /** Freehand DRAW-mesh path in flight + the adaptive vertex preview
+     *  riding along the path (becomes the mesh on release). */
+    data class DrawLive(val pts: List<Pt>, val preview: List<Pt>? = null) : Live
 }
 
 /** Camera: world → screen is `p * scale + t`. */
@@ -110,6 +111,7 @@ class AnnotateState(undoDepth: Int) {
         denseRing = null
         fuseNextCommit = false
         pendingMid = null
+        drawArmed = false
     }
 
     /**
@@ -123,6 +125,13 @@ class AnnotateState(undoDepth: Int) {
 
     /** Edge midpoint armed for insertion (two-tap confirm); null = none. */
     var pendingMid by mutableStateOf<Int?>(null)
+
+    /**
+     * DRAW tool: drawing only starts after the canvas button is pressed
+     * (owner req — an accidental touch never begins a mesh). Cleared on
+     * image change, tool change and after each committed draw.
+     */
+    var drawArmed by mutableStateOf(false)
 
     fun armFusion() {
         fuseNextCommit = true

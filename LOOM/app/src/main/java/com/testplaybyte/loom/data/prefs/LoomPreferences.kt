@@ -129,6 +129,7 @@ object SettingsCodec {
         put("defaultDensity", s.defaultDensity)
         put("densityManual", s.densityManual)
         put("magnifier", s.magnifier)
+        put("meshHighlight", s.meshHighlight)
         put("haptics", s.haptics)
         put("autosave", s.autosave)
         put("undoDepth", s.undoDepth)
@@ -145,6 +146,7 @@ object SettingsCodec {
                 defaultDensity = LoomRules.clampDefaultDensity(o.optInt("defaultDensity", 16)),
                 densityManual = o.optBoolean("densityManual", false),
                 magnifier = o.optBoolean("magnifier", true),
+                meshHighlight = o.optInt("meshHighlight", 1).coerceIn(0, 2),
                 haptics = o.optBoolean("haptics", true),
                 autosave = o.optBoolean("autosave", true),
                 undoDepth = LoomRules.clampUndoDepth(o.optInt("undoDepth", 50)),

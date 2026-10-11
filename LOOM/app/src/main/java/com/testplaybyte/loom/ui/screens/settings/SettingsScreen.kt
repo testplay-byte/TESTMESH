@@ -153,6 +153,22 @@ fun SettingsScreen(
                     },
                 )
                 Divider()
+                Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                    Text("Mesh highlight", style = loomType.bodyStrong, color = c.text)
+                    Text("How strong the object highlight looks", style = loomType.small, color = c.textMuted)
+                    Spacer(Modifier.height(8.dp))
+                    LoomSegmented(
+                        value = settings.meshHighlight,
+                        options = listOf(
+                            SegOption(0, "Subtle", null),
+                            SegOption(1, "Normal", null),
+                            SegOption(2, "Bold", null),
+                        ),
+                        onSelect = { patch(settings.copy(meshHighlight = it)) },
+                        contentDescription = "Mesh highlight strength",
+                    )
+                }
+                Divider()
                 LoomRow(
                     title = "Magnifier loupe",
                     sub = "Zoom lens while dragging vertices",
@@ -265,7 +281,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(14.dp))
             SectionLabel("About")
             LoomCard(contentPadding = PaddingValues(14.dp)) {
-                AboutRow("Loom", "0.8.0 · prototype")
+                AboutRow("Loom", "0.9.0 · prototype")
                 AboutRow("Design language", "Loom — warm graphite + signal amber")
                 // The prototype ships the repo name of its own demo; this
                 // build points at the real repository instead.
