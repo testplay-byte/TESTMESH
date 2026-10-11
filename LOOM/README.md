@@ -186,6 +186,10 @@ Design rules kept from the handoff package:
 | Two-step project deletion (optional whole-folder delete) | Owner requirement: the first confirm removes Loom data only; a second confirm warns that the ENTIRE folder (images + annotations) will be deleted and really deletes it. | for a real dataset tool (the spec defers the photo picker; the folder scanner alone would leave imported photos with no entry point). Uses the system photo picker; files are copied into the project folder. |
 | Settings → About repository string | Shows the real repository (`testplay-byte/TESTMESH`) instead of the prototype's demo repo name. |
 | Splash is the logo only, fully animated | Owner feedback: no bar/tagline; the animation lives on the mark (PathMeasure trim + weaving arcs + spring dots + settle scale). |
+| Seven canvas tools incl. freehand DRAW-mesh | Owner requirement: trace around an object and vertices drop onto the path adaptively (auto or manual density); the drawn loop closes on release and becomes the density re-fit source. |
+| Amber is reserved for the working mesh | Owner requirement: unnamed/in-progress geometry is amber; class colors cycle c2..c8 so no saved object is ever amber, and the mask/labels follow the class color. |
+| Zoom-invariant overlay geometry | Owner requirement: prompt dots (+/− glyphs), vertex handles, brush line and loupe stay at their on-screen size at any zoom; prompt dots hide outside the dot tools. |
+| Object flow dirty-gating | Owner requirement: Save object highlights only with real changes; reopening a saved object and tapping another one switches without demanding a save; the class picker adds classes inline and closes on pick. |
 | YOLO export = segmentation format | Meshes are polygons; `labels/*.txt` carry `classIndex x1 y1 …` and the export README documents the choice (per docs/05 §5). |
 
 ## Build & release
