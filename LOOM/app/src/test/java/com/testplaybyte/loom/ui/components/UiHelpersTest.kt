@@ -39,7 +39,7 @@ class UiHelpersTest {
     @Test
     fun settingsCodecRoundTripsEveryField() {
         val settings = LoomSettings(
-            dotSize = 14,
+            dotSize = 16,
             defaultDensity = 24,
             magnifier = false,
             haptics = false,
@@ -58,7 +58,7 @@ class UiHelpersTest {
         // clamps out-of-range values instead of trusting them
         val clamped = SettingsCodec.decode("""{"dotSize":99,"defaultDensity":99,"undoDepth":7}""")
         assertEquals(10, clamped.dotSize)
-        assertEquals(36, clamped.defaultDensity)
+        assertEquals(99, clamped.defaultDensity) // 3..200 now allowed
         assertEquals(10, clamped.undoDepth)
     }
 

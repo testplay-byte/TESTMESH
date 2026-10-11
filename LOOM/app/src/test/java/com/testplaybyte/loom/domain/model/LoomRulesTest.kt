@@ -32,8 +32,9 @@ class LoomRulesTest {
     fun clampsMatchTheSpecRanges() {
         assertEquals(3, LoomRules.clampDensity(0))
         assertEquals(200, LoomRules.clampDensity(300))
-        assertEquals(8, LoomRules.clampDefaultDensity(1))
-        assertEquals(36, LoomRules.clampDefaultDensity(50))
+        assertEquals(3, LoomRules.clampDefaultDensity(1))
+        assertEquals(50, LoomRules.clampDefaultDensity(50))
+        assertEquals(200, LoomRules.clampDefaultDensity(300))
         assertEquals(10, LoomRules.clampUndoDepth(3))
         assertEquals(100, LoomRules.clampUndoDepth(140))
         assertEquals(50, LoomRules.clampUndoDepth(53))
