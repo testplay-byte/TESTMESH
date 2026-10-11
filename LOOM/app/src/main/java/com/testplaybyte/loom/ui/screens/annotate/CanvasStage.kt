@@ -135,9 +135,9 @@ fun CanvasStage(
     var size by remember { mutableStateOf(IntSize.Zero) }
     val gestures = remember { Gestures(state, scope) }.apply {
         densityPx = density.density
-        onWarn = onWarn
-        onStrokeRemoved = onCanvasFeedback
-        onDotPlaced = onCanvasFeedback
+        this.onWarn = onWarn
+        this.onStrokeRemoved = onCanvasFeedback
+        this.onDotPlaced = onCanvasFeedback
     }
 
     // Fit-contain once per image; re-clamp when the viewport changes.
