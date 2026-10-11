@@ -55,6 +55,7 @@ object LoomJsonCodec {
         val dots: List<Dot>,
         val mesh: List<Pt>?,
         val objects: List<DecodedObj>,
+        val densityAuto: Boolean = true,
         val strokes: List<Stroke>,
         /** true when coordinates are real pixels (export) — caller scales. */
         val spaceIsWorld: Boolean,

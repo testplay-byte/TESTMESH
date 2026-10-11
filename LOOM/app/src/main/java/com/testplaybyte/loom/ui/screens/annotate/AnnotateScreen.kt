@@ -551,7 +551,7 @@ fun AnnotateScreen(
                 onHintTap = { dismissHint() },
                 onWarn = { msg -> vm.toast(msg, ToastIcon.WARN) },
                 labelColors = project.labels.associate {
-                    it.id to com.testplaybyte.loom.ui.theme.classColor(it.color)
+                    it.id to c.classColor(it.color)
                 },
                 onCanvasFeedback = {
                     if (settings.haptics) {
@@ -779,7 +779,9 @@ fun AnnotateScreen(
                                 state.meshGen++
                                 // manual density becomes the default for
                                 // not-yet-annotated images too (owner req)
-                                vm.repository.patchSettings(settings.copy(defaultDensity = v))
+                                launch {
+                                    vm.repository.patchSettings(settings.copy(defaultDensity = v))
+                                }
                                 pulseNow()
                             }
                         }
@@ -1022,7 +1024,9 @@ fun AnnotateScreen(
                             mesh = remeshForImage(image, v, prev, state.denseRing),
                         )
                     }
-                    vm.repository.patchSettings(settings.copy(defaultDensity = v))
+                    scope.launch {
+                        vm.repository.patchSettings(settings.copy(defaultDensity = v))
+                    }
                     state.meshGen++
                 },
             )

@@ -523,7 +523,9 @@ private fun LoupeOverlay(
     // Fixed parking spot in a TOP corner, far from the finger — it flips
     // to the top-left when the drag happens in the top-right region so it
     // never covers the work area or leaves the viewport.
-    val nearTopRight = sy < LOUPE_PX + 60f && sx > viewport.width - LOUPE_PX - 60f
+    val dragSx = pos.x * cam.scale + cam.tx
+    val dragSy = pos.y * cam.scale + cam.ty
+    val nearTopRight = dragSy < LOUPE_PX + 60f && dragSx > viewport.width - LOUPE_PX - 60f
     val cx = if (nearTopRight) half + 16f else viewport.width - half - 16f
     val cy = 16f + half
     val lvw = LOUPE_PX / LOUPE_MAG
@@ -833,7 +835,7 @@ private class Gestures(
                 kind = Kind.DOT
                 dotId = hit.id
                 state.selection = Selection.DotSel(hit.id)
-                onCanvasFeedback?.invoke()
+                onDotPlaced?.invoke()
             }
             // nothing under the finger → a plain long-press does nothing
         }
@@ -1092,11 +1094,11 @@ private class Gestures(
                                 if (state.pendingMid == midIdx) {
                                     state.pendingMid = null
                                     insertAt(toWorld(pressStage))
-                                    onCanvasFeedback?.invoke()
+                                    onDotPlaced?.invoke()
                                 } else {
                                     state.pendingMid = midIdx
                                     state.selection = null
-                                    onCanvasFeedback?.invoke()
+                                    onDotPlaced?.invoke()
                                 }
                             } else {
                                 state.pendingMid = null
