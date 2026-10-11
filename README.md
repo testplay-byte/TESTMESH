@@ -878,7 +878,7 @@ annotate canvas, export, settings), and a folder-first data model.
   with `LOOM.apk`). Owner directive honored: **all builds/verification run
   on GitHub Actions only** — no local Gradle runs.
 
-Version: LOOM **0.8.0** (versionCode 5) — releases `loom-v0.4.0` (first
+Version: LOOM **0.9.0** (versionCode 6) — releases `loom-v0.4.0` (first
 build), `loom-v0.5.0` (Magic Touch smart selection), `loom-v0.6.0`
 (multi-object annotations, per-image LabelMe v5 sidecars, adaptive meshes),
 `loom-v0.6.1` (annotation-screen overhaul from dual self-review),
@@ -888,4 +888,12 @@ class colors, tap-to-add dots, annotation-only sidecars, two-step delete),
 screen-constant dots with +/− glyphs, tap-reliable steppers, deleted-name
 project re-creation fix, dirty-aware object flow with inline class add,
 amber reserved for the working mesh, real-px loupe clamp, cumulative
-vertex drag, sequential LabelMe group_ids).
+vertex drag, sequential LabelMe group_ids).,
+`loom-v0.9.0` (device-review round 5: background workspace scan with
+loading state — no more setup screen every launch or phantom empty list,
+targeted project-folder refresh on open, Save & next draft race fixed,
+brush-context so +/− dots refine after a brush, dots shrink at low zoom,
+outside-image taps never place dots, loupe zoom-relative + bottom-corner
+parking + exact alignment, DRAW tool arm-button + live vertex preview,
+numbered object chips with tap-to-close, distinct class palette, mesh
+highlight strength setting, 2000% zoom).
