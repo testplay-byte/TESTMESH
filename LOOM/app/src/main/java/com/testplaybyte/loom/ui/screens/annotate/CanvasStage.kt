@@ -778,6 +778,9 @@ private class Gestures(
     private fun addDot(kind: DotKind, w: Pt): Dot? {
         val dot = Dot(Ids.uid(if (kind == DotKind.POS) "dot" else "dotn"), kind, w.x, w.y)
         state.commit { prev -> prev.copy(dots = prev.dots + dot) }
+        // the sculpt/segmentation that follows this dot is FUSED into the
+        // same undo unit — one Undo removes the dot AND its mesh
+        state.armFusion()
         onDotPlaced?.invoke()
         return dot
     }
@@ -827,18 +830,32 @@ private class Gestures(
         lpJob?.cancel()
         lpJob = scope.launch {
             delay(500)
-            val k = pendingDotKind ?: return@launch
-            pendingDotKind = null
-            val hit = hitDot(pendingDotPos)
+            pendingDotKind ?: return@launch
+            // long-press = grab the nearest dot within a GENEROUS radius
+            // (the press itself already checked the normal hit radius —
+            // the long-press is the "I meant that dot just outside it")
+            val hit = nearestDot(pendingDotPos, hitPx * 2.5f)
             if (hit != null) {
-                // long-press = grab the nearest dot (with a tick)
+                pendingDotKind = null
                 kind = Kind.DOT
                 dotId = hit.id
                 state.selection = Selection.DotSel(hit.id)
                 onDotPlaced?.invoke()
             }
-            // nothing under the finger → a plain long-press does nothing
+            // nothing near → keep the pending add armed: a later move pans,
+            // a clean release still places the dot
         }
+    }
+
+    private fun nearestDot(w: Pt, radiusPx: Float): Dot? {
+        val r = radiusPx / state.cam.scale
+        var best: Dot? = null
+        var bd = Float.MAX_VALUE
+        for (d in state.dots) {
+            val dist = hypot(d.x - w.x, d.y - w.y)
+            if (dist < bd) { bd = dist; best = d }
+        }
+        return if (best != null && bd <= r) best else null
     }
 
     // ── pointer loop ─────────────────────────────────────────────────────

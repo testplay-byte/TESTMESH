@@ -249,7 +249,7 @@ class LoomRepository(
                     images = images,
                     labels = labels,
                     format = _settings.value.defaultFormat,
-                    states = images.associate { it.id to ImageState.empty(_settings.value.defaultDensity) },
+                    states = images.associate { it.id to ImageState.empty(_settings.value.defaultDensity, auto = !_settings.value.densityManual) },
                 )
                 writeProjectFolder(project, renderMissingImages = true)
                 project = touch(project)
@@ -258,7 +258,8 @@ class LoomRepository(
             }
         }
 
-    suspend fun deleteProject(projectId: String, deleteFromDisk: Boolean = false) = withContext(io) {
+    /** @return true when [deleteFromDisk] was requested AND the folder went away. */
+    suspend fun deleteProject(projectId: String, deleteFromDisk: Boolean = false): Boolean = withContext(io) {
         mutex.withLock {
             val p = projectById(projectId) ?: return@withLock
             var folderGone = false
@@ -266,16 +267,16 @@ class LoomRepository(
                 // Owner-confirmed: the whole folder (images + annotations)
                 // is deleted from the workspace.
                 folderGone = runCatching { workspace.deleteFolder(p.slug) }.getOrDefault(false)
-                ImageStore.evict(p.slug)
             }
-            if (!folderGone) {
-                // Folder (or fallback data) remains on disk — dismiss the
-                // slug so it is neither re-adopted nor re-seeded.
-                dismissed = dismissed + p.slug
-                prefs.addDismissed(p.slug)
-            }
+            // Dismiss ALWAYS: a deleted folder must never be re-adopted or
+            // re-seeded (deleting the demo from disk would otherwise
+            // resurrect it), and a surviving folder must stop adoption.
+            ImageStore.evict(p.slug)
+            dismissed = dismissed + p.slug
+            prefs.addDismissed(p.slug)
             removeProjectData(p, deleteIfPureDemo = false)
             _projects.value = _projects.value.filter { it.id != projectId }
+            folderGone
         }
     }
 
@@ -295,7 +296,6 @@ class LoomRepository(
             val newImages = ArrayList<ProjectImage>()
             var done = 0
             for (uri in uris) {
-                done++
                 withContext(kotlinx.coroutines.Dispatchers.Main) { onProgress(done, uris.size) }
                 val display = queryDisplayName(uri) ?: "photo.jpg"
                 val fileName = uniqueFileName(p, display)
@@ -304,10 +304,12 @@ class LoomRepository(
                 if (written <= 0) continue
                 val (w, h) = ImageStore.bounds(workspace, p.slug, fileName) ?: (800 to 600)
                 newImages.add(ProjectImage(Ids.uid("im"), fileName, sceneId = null, width = w, height = h))
+                done++
+                withContext(kotlinx.coroutines.Dispatchers.Main) { onProgress(done, uris.size) }
             }
             if (newImages.isEmpty()) return@withLock 0
             val states = HashMap(p.states)
-            for (im in newImages) states[im.id] = ImageState.empty(_settings.value.defaultDensity)
+            for (im in newImages) states[im.id] = ImageState.empty(_settings.value.defaultDensity, auto = !_settings.value.densityManual)
             val next = touch(p.copy(images = p.images + newImages, states = states))
             writeProjectFolder(next, renderMissingImages = false)
             replaceInMemory(next)
@@ -743,6 +745,7 @@ class LoomRepository(
                         },
                         strokes = d.strokes,
                         density = d.density,
+                        densityAuto = d.densityAuto,
                         labelId = d.labelName?.let { name ->
                             project.labels.firstOrNull { it.name.equals(name, ignoreCase = true) }?.id
                         },
@@ -762,7 +765,7 @@ class LoomRepository(
             for (im in project.images) {
                 val text = workspace.readText(folder, LabelMeCodec.fileNameFor(im.file)) ?: continue
                 val shapes = LabelMeCodec.decode(text)
-                val base = states[im.id] ?: ImageState.empty(_settings.value.defaultDensity)
+                val base = states[im.id] ?: ImageState.empty(_settings.value.defaultDensity, auto = !_settings.value.densityManual)
                 if (shapes.isNotEmpty()) {
                     val (objs, working) = LabelMeCodec.toAnnotation(shapes, project.labels, im.width, im.height)
                     states[im.id] = base.copy(
@@ -797,7 +800,7 @@ class LoomRepository(
             }
             val states = HashMap(project.states)
             for (im in extra) {
-                states[im.id] = ImageState.empty(_settings.value.defaultDensity)
+                states[im.id] = ImageState.empty(_settings.value.defaultDensity, auto = !_settings.value.densityManual)
             }
             if (project.images.isEmpty() && extra.isNotEmpty()) {
                 // Image-only folder adoption: name it after the folder.

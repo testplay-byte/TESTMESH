@@ -145,10 +145,13 @@ data class Project(
 
 /** Canvas defaults + annotation behavior (docs/05 §2 `LoomSettings`). */
 data class LoomSettings(
-    /** Prompt-dot radius, world units: S=8, M=10, L=14. */
+    /** Prompt-dot radius, world units: S=6, M=10, L=16. */
     val dotSize: Int = 10,
-    /** Default mesh density for new images/projects (8–36). */
+    /** Default mesh density for new images/projects. */
     val defaultDensity: Int = 16,
+    /** True once the user picked a manual density — new images then start
+     *  at [defaultDensity] instead of the smart auto count. */
+    val densityManual: Boolean = false,
     /** Loupe while dragging vertices. */
     val magnifier: Boolean = true,
     /** Haptic feedback on commit actions. */
@@ -164,7 +167,7 @@ data class LoomSettings(
 ) {
     companion object {
         val DEFAULT = LoomSettings()
-        val DOT_SIZES = listOf(8, 10, 14)
+        val DOT_SIZES = listOf(6, 10, 16)
     }
 }
 
@@ -211,14 +214,14 @@ object LoomRules {
     const val SLUG_MAX = 24
     const val DENSITY_MIN = 3
     const val DENSITY_MAX = 200
-    const val DEFAULT_DENSITY_MIN = 8
-    const val DEFAULT_DENSITY_MAX = 36
+    const val DEFAULT_DENSITY_MIN = 3
+    const val DEFAULT_DENSITY_MAX = 200
     const val UNDO_MIN = 10
     const val UNDO_MAX = 100
     const val UNDO_STEP = 5
     const val SPLIT_MAX = 40
-    const val DOT_SIZES_MIN = 8
-    const val DOT_SIZES_MAX = 14
+    const val DOT_SIZES_MIN = 6
+    const val DOT_SIZES_MAX = 16
 
     /** Project name: trim, max 32; empty → "Untitled dataset". */
     fun cleanProjectName(raw: String): String =

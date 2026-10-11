@@ -115,6 +115,7 @@ object SettingsCodec {
     fun encode(s: LoomSettings): String = JSONObject().apply {
         put("dotSize", s.dotSize)
         put("defaultDensity", s.defaultDensity)
+        put("densityManual", s.densityManual)
         put("magnifier", s.magnifier)
         put("haptics", s.haptics)
         put("autosave", s.autosave)
@@ -130,6 +131,7 @@ object SettingsCodec {
             LoomSettings(
                 dotSize = o.optInt("dotSize", 10).let { if (it in LoomSettings.DOT_SIZES) it else 10 },
                 defaultDensity = LoomRules.clampDefaultDensity(o.optInt("defaultDensity", 16)),
+                densityManual = o.optBoolean("densityManual", false),
                 magnifier = o.optBoolean("magnifier", true),
                 haptics = o.optBoolean("haptics", true),
                 autosave = o.optBoolean("autosave", true),

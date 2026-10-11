@@ -39,7 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.animation.core.Animatable
+
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloat
@@ -218,13 +218,10 @@ fun AnnotateScreen(
         }
     }
 
-    // Visual pulse (280ms) + real haptic on commit actions (docs/04 §11).
-    val pulseAlpha = remember { Animatable(0f) }
+    // Real haptic on commit actions (docs/04 §11).
     val pulseNow: () -> Unit = {
         scope.launch {
             if (settings.haptics) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            pulseAlpha.snapTo(1f)
-            pulseAlpha.animateTo(0f, tween(LoomMotion.HAPTIC_PULSE_MS.toInt(), easing = LoomMotion.ease))
         }
     }
 
@@ -400,9 +397,13 @@ fun AnnotateScreen(
         }
     }
 
-    // A rebuilt mesh (sculpt/segment/remesh) invalidates vertex indices.
+    // A rebuilt mesh (sculpt/segment/remesh) invalidates vertex indices
+    // and any armed midpoint.
     LaunchedEffect(state.meshGen) {
-        if (state.meshGen > 0) state.selection = null
+        if (state.meshGen > 0) {
+            state.selection = null
+            state.pendingMid = null
+        }
     }
 
     // ── exit flush ───────────────────────────────────────────────────────
@@ -780,7 +781,7 @@ fun AnnotateScreen(
                                 // manual density becomes the default for
                                 // not-yet-annotated images too (owner req)
                                 launch {
-                                    vm.repository.patchSettings(settings.copy(defaultDensity = v))
+                                    vm.repository.patchSettings(settings.copy(defaultDensity = v, densityManual = true))
                                 }
                                 pulseNow()
                             }
@@ -1025,7 +1026,7 @@ fun AnnotateScreen(
                         )
                     }
                     scope.launch {
-                        vm.repository.patchSettings(settings.copy(defaultDensity = v))
+                        vm.repository.patchSettings(settings.copy(defaultDensity = v, densityManual = true))
                     }
                     state.meshGen++
                 },

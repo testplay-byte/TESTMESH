@@ -106,6 +106,8 @@ class AnnotateState(undoDepth: Int) {
         densityDraft = null
         sculpting = false
         denseRing = null
+        fuseNextCommit = false
+        pendingMid = null
     }
 
     /**
@@ -149,11 +151,13 @@ class AnnotateState(undoDepth: Int) {
     }
 
     fun undo() {
+        fuseNextCommit = false
         stack.undo()
         present = stack.present ?: return
     }
 
     fun redo() {
+        fuseNextCommit = false
         stack.redo()
         present = stack.present ?: return
     }

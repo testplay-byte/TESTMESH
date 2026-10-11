@@ -206,8 +206,12 @@ fun ProjectsScreen(
                     onClick = {
                         deleting?.let { p ->
                             scope.launch {
-                                vm.repository.deleteProject(p.id, deleteFromDisk = true)
-                                vm.toast("Folder deleted", com.testplaybyte.loom.domain.model.ToastIcon.CHECK)
+                                val gone = vm.repository.deleteProject(p.id, deleteFromDisk = true)
+                                vm.toast(
+                                    if (gone) "Folder deleted" else "Removed from Loom — folder could not be deleted",
+                                    if (gone) com.testplaybyte.loom.domain.model.ToastIcon.CHECK
+                                    else com.testplaybyte.loom.domain.model.ToastIcon.WARN,
+                                )
                             }
                         }
                         deleteId = null

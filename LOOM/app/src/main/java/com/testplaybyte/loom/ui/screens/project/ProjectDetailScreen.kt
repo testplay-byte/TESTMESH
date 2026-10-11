@@ -66,7 +66,6 @@ import com.testplaybyte.loom.ui.components.MasonryGrid
 import com.testplaybyte.loom.ui.components.ProjectImageArt
 import com.testplaybyte.loom.ui.components.SectionLabel
 import com.testplaybyte.loom.ui.components.StatusChip
-import com.testplaybyte.loom.ui.components.tileAspect
 import com.testplaybyte.loom.ui.icons.IconCheck
 import com.testplaybyte.loom.ui.icons.IconExport
 import com.testplaybyte.loom.ui.icons.IconImage
@@ -125,11 +124,15 @@ fun ProjectDetailScreen(
         if (uris.isNotEmpty()) {
             scope.launch {
                 addingTo = 0 to uris.size
-                vm.repository.addImages(project.id, uris) { done, total ->
+                val added = vm.repository.addImages(project.id, uris) { done, total ->
                     addingTo = done to total
                 }
                 addingTo = null
-                vm.toast("Images added", com.testplaybyte.loom.domain.model.ToastIcon.CHECK)
+                if (added > 0) {
+                    vm.toast("Added $added image" + if (added == 1) "" else "s", com.testplaybyte.loom.domain.model.ToastIcon.CHECK)
+                } else {
+                    vm.toast("Couldn’t add the images", com.testplaybyte.loom.domain.model.ToastIcon.WARN)
+                }
             }
         }
     }
@@ -439,8 +442,11 @@ fun ProjectDetailScreen(
                         deleteConfirm = false
                         deleteStage = 1
                         scope.launch {
-                            vm.repository.deleteProject(project.id, deleteFromDisk = true)
-                            vm.toast("Folder deleted", ToastIcon.CHECK)
+                            val gone = vm.repository.deleteProject(project.id, deleteFromDisk = true)
+                            vm.toast(
+                                if (gone) "Folder deleted" else "Removed from Loom — folder could not be deleted",
+                                if (gone) ToastIcon.CHECK else ToastIcon.WARN,
+                            )
                         }
                         onBack()
                     },
