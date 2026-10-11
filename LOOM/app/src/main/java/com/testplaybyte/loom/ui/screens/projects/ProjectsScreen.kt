@@ -80,6 +80,7 @@ fun ProjectsScreen(
     val projects by vm.projects.collectAsState()
     val workspacePath by vm.workspacePath.collectAsState()
     var deleteId by remember { mutableStateOf<String?>(null) }
+    var deleteStage by remember { mutableStateOf(1) }
     val deleting = projects.find { it.id == deleteId }
     val scope = rememberCoroutineScope()
 
@@ -153,36 +154,77 @@ fun ProjectsScreen(
 
     LoomSheet(
         open = deleting != null,
-        onClose = { deleteId = null },
-        title = "Delete project?",
+        onClose = { deleteId = null; deleteStage = 1 },
+        title = if (deleteStage == 1) "Delete project?" else "Delete folder and images?",
     ) {
-        Text(
-            text = "Deletes the local project data. Images on disk are not touched.",
-            style = loomType.small.copy(fontSize = 13.sp),
-            color = c.textMuted,
-            modifier = Modifier.padding(bottom = 14.dp),
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            LoomButton(
-                onClick = {
-                    deleting?.let { p ->
-                        scope.launch {
-                            vm.repository.deleteProject(p.id)
-                            vm.toast("Project deleted", com.testplaybyte.loom.domain.model.ToastIcon.CHECK)
+        if (deleteStage == 1) {
+            Text(
+                text = "Removes the project from Loom. Its folder and images stay on disk.",
+                style = loomType.small.copy(fontSize = 13.sp),
+                color = c.textMuted,
+                modifier = Modifier.padding(bottom = 14.dp),
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LoomButton(
+                    onClick = {
+                        deleting?.let { p ->
+                            scope.launch {
+                                vm.repository.deleteProject(p.id)
+                                vm.toast("Project deleted", com.testplaybyte.loom.domain.model.ToastIcon.CHECK)
+                            }
                         }
-                    }
-                    deleteId = null
-                },
-                fullWidth = true,
-                variant = LoomButtonVariant.DANGER,
-                label = "Delete",
+                        deleteId = null
+                        deleteStage = 1
+                    },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.DANGER,
+                    label = "Delete from Loom",
+                )
+                LoomButton(
+                    onClick = { deleteStage = 2 },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.TONAL,
+                    label = "Delete folder and images too…",
+                )
+                LoomButton(
+                    onClick = { deleteId = null; deleteStage = 1 },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.GHOST,
+                    label = "Cancel",
+                )
+            }
+        } else {
+            Text(
+                text = "This deletes the ENTIRE project folder — the images, the annotations and every export — permanently.",
+                style = loomType.small.copy(fontSize = 13.sp),
+                color = c.error,
+                fontWeight = FontWeight.W600,
+                modifier = Modifier.padding(bottom = 14.dp),
             )
-            LoomButton(
-                onClick = { deleteId = null },
-                fullWidth = true,
-                variant = LoomButtonVariant.GHOST,
-                label = "Cancel",
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LoomButton(
+                    onClick = {
+                        deleting?.let { p ->
+                            scope.launch {
+                                vm.repository.deleteProject(p.id, deleteFromDisk = true)
+                                vm.toast("Folder deleted", com.testplaybyte.loom.domain.model.ToastIcon.CHECK)
+                            }
+                        }
+                        deleteId = null
+                        deleteStage = 1
+                    },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.DANGER,
+                    label = "Delete everything",
+                )
+                LoomButton(
+                    onClick = { deleteStage = 1 },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.GHOST,
+                    label = "Back",
+                )
+            }
+        }
         }
     }
 }

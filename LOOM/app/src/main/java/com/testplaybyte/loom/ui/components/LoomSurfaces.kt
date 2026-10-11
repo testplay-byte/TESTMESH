@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -208,6 +209,7 @@ fun LoomSheet(
             Column(
                 modifier = modifier
                     .fillMaxWidth()
+                    .imePadding()
                     // nav-bar inset is applied once at the app shell
                     .clip(RoundedCornerShape(topStart = LoomShape.RADIUS_SURFACE_DP.dp, topEnd = LoomShape.RADIUS_SURFACE_DP.dp))
                     .background(c.surface1)

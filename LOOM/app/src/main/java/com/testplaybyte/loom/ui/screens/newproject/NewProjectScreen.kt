@@ -85,7 +85,7 @@ fun NewProjectScreen(
     val workspacePath by vm.workspacePath.collectAsState()
 
     var name by remember { mutableStateOf("") }
-    val labels = remember { mutableStateListOf("Object") }
+    val labels = remember { mutableStateListOf<String>() }
 
     var labelSheet by remember { mutableStateOf(false) }
     var labelDraft by remember { mutableStateOf("") }
@@ -216,6 +216,6 @@ fun NewProjectScreen(
             label = "Add",
         )
         Spacer(Modifier.height(8.dp))
-        Text("Up to 8 classes per project.", style = loomType.small, color = c.textMuted)
+        Text("Classes name your objects — add the ones you need (up to 8).", style = loomType.small, color = c.textMuted)
     }
 }

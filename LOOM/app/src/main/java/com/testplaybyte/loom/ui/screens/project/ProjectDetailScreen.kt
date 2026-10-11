@@ -111,6 +111,7 @@ fun ProjectDetailScreen(
     var overflowOpen by remember { mutableStateOf(false) }
     var labelsSheet by remember { mutableStateOf(false) }
     var deleteConfirm by remember { mutableStateOf(false) }
+    var addingTo by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var newLabel by remember { mutableStateOf("") }
 
     // The folder is the database: refresh states/images whenever the screen
@@ -122,7 +123,14 @@ fun ProjectDetailScreen(
         ActivityResultContracts.PickMultipleVisualMedia(20),
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
-            scope.launch { vm.repository.addImages(project.id, uris) }
+            scope.launch {
+                addingTo = 0 to uris.size
+                vm.repository.addImages(project.id, uris) { done, total ->
+                    addingTo = done to total
+                }
+                addingTo = null
+                vm.toast("Images added", com.testplaybyte.loom.domain.model.ToastIcon.CHECK)
+            }
         }
     }
 
@@ -222,10 +230,28 @@ fun ProjectDetailScreen(
                     color = c.textMuted,
                 )
             } else {
+                if (addingTo != null) {
+                    val (done, total) = addingTo!!
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        com.testplaybyte.loom.ui.components.LoomMeter(
+                            value = if (total == 0) 0f else done * 100f / total,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = "Adding $done/$total…",
+                            style = loomType.monoSmall,
+                            color = c.textMuted,
+                        )
+                    }
+                }
                 MasonryGrid(
                     items = project.images,
                     keyOf = { it.id },
-                    aspectOf = { tileAspect(it.id) },
+                    // REAL image aspect — tall images are never cropped
+                    aspectOf = { (it.width.toFloat() / it.height.toFloat()).coerceIn(0.6f, 1.7f) },
                 ) { image ->
                     val index = project.images.indexOf(image)
                     ImageTile(
@@ -235,8 +261,8 @@ fun ProjectDetailScreen(
                         targetName = image.sceneId
                             ?.let { SceneLibrary.byId(it).target.name }
                             ?: project.labels.firstOrNull { it.id == project.stateOf(image.id).labelId }?.name
-                            ?: "—",
-                        aspect = tileAspect(image.id),
+                            ?: "Unlabeled",
+                        aspect = (image.width.toFloat() / image.height.toFloat()).coerceIn(0.6f, 1.7f),
                         onClick = { onAnnotate(index) },
                     ) {
                         ProjectImageArt(
@@ -244,6 +270,7 @@ fun ProjectDetailScreen(
                             projectSlug = project.slug,
                             image = image,
                             modifier = Modifier.fillMaxSize(),
+                            mode = com.testplaybyte.loom.ui.components.ImageScaleMode.FIT,
                         )
                     }
                 }
@@ -359,34 +386,75 @@ fun ProjectDetailScreen(
         )
     }
 
-    // ── delete confirm ────────────────────────────────────────────────────
-    LoomSheet(open = deleteConfirm, onClose = { deleteConfirm = false }, title = "Delete project?") {
-        Text(
-            text = "Deletes the local project data. Images on disk are not touched.",
-            style = loomType.small.copy(fontSize = 13.sp),
-            color = c.textMuted,
-            modifier = Modifier.padding(bottom = 14.dp),
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            LoomButton(
-                onClick = {
-                    deleteConfirm = false
-                    scope.launch {
-                        vm.repository.deleteProject(project.id)
-                        vm.toast("Project deleted", ToastIcon.CHECK)
-                    }
-                    onBack()
-                },
-                fullWidth = true,
-                variant = LoomButtonVariant.DANGER,
-                label = "Delete",
+    // ── delete confirm: step 1 removes Loom data; step 2 (owner req)
+    //    warns and deletes the WHOLE folder including images ──────────────
+    var deleteStage by remember { mutableStateOf(1) }
+    LoomSheet(open = deleteConfirm, onClose = { deleteConfirm = false; deleteStage = 1 }, title = "Delete project?") {
+        if (deleteStage == 1) {
+            Text(
+                text = "Removes the project from Loom. Its folder and images stay on disk.",
+                style = loomType.small.copy(fontSize = 13.sp),
+                color = c.textMuted,
+                modifier = Modifier.padding(bottom = 14.dp),
             )
-            LoomButton(
-                onClick = { deleteConfirm = false },
-                fullWidth = true,
-                variant = LoomButtonVariant.GHOST,
-                label = "Cancel",
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LoomButton(
+                    onClick = {
+                        deleteConfirm = false
+                        deleteStage = 1
+                        scope.launch {
+                            vm.repository.deleteProject(project.id)
+                            vm.toast("Project deleted", ToastIcon.CHECK)
+                        }
+                        onBack()
+                    },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.DANGER,
+                    label = "Delete from Loom",
+                )
+                LoomButton(
+                    onClick = { deleteStage = 2 },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.TONAL,
+                    label = "Delete folder and images too…",
+                )
+                LoomButton(
+                    onClick = { deleteConfirm = false; deleteStage = 1 },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.GHOST,
+                    label = "Cancel",
+                )
+            }
+        } else {
+            Text(
+                text = "This deletes the ENTIRE project folder — the images, the annotations and every export — permanently.",
+                style = loomType.small.copy(fontSize = 13.sp),
+                color = c.error,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.W600,
+                modifier = Modifier.padding(bottom = 14.dp),
             )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LoomButton(
+                    onClick = {
+                        deleteConfirm = false
+                        deleteStage = 1
+                        scope.launch {
+                            vm.repository.deleteProject(project.id, deleteFromDisk = true)
+                            vm.toast("Folder deleted", ToastIcon.CHECK)
+                        }
+                        onBack()
+                    },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.DANGER,
+                    label = "Delete everything",
+                )
+                LoomButton(
+                    onClick = { deleteStage = 1 },
+                    fullWidth = true,
+                    variant = LoomButtonVariant.GHOST,
+                    label = "Back",
+                )
+            }
         }
     }
 }
@@ -429,8 +497,15 @@ private fun ImageTile(
                     .fillMaxWidth()
                     .aspectRatio(aspect),
                 radius = 8.dp,
+                background = androidx.compose.ui.graphics.Color.Transparent,
             ) {
-                art()
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(c.surface2),
+                ) {
+                    art()
+                }
                 StatusChip(
                     status = status,
                     modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
@@ -448,20 +523,31 @@ private fun ImageTile(
             }
         }
         Spacer(Modifier.height(5.dp))
-        Text(
-            text = fileName,
-            style = loomType.monoSmall,
-            color = c.textMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = targetName,
-            style = loomType.smallStrong,
-            color = c.text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(c.surface2)
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = fileName,
+                    style = loomType.monoSmall,
+                    color = c.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = targetName,
+                    style = loomType.smallStrong,
+                    color = if (targetName == "Unlabeled") c.textMuted else c.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 

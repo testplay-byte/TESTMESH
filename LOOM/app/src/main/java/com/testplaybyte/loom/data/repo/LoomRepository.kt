@@ -227,7 +227,11 @@ class LoomRepository(
                 val cleanName = LoomRules.cleanProjectName(name)
                 val base = LoomRules.slugify(cleanName)
                 val prefix = parentFolder?.takeIf { it.isNotBlank() }?.let { "$it/" } ?: ""
-                val slug = uniqueSlug("$prefix$base")
+                val wanted = "$prefix$base"
+                val slug = uniqueSlug(wanted)
+                if (slug != wanted) {
+                    toast("A folder named \u201C${wanted.substringAfterLast('/')}\u201D already exists — created \u201C${slug.substringAfterLast('/')}\u201D")
+                }
                 val labels = labelNames.take(LoomRules.LABEL_MAX).mapIndexed { i, n ->
                     Label(Ids.uid("lb"), n, "c${(i % 8) + 1}")
                 }
@@ -254,21 +258,24 @@ class LoomRepository(
             }
         }
 
-    suspend fun deleteProject(projectId: String) = withContext(io) {
+    suspend fun deleteProject(projectId: String, deleteFromDisk: Boolean = false) = withContext(io) {
         mutex.withLock {
             val p = projectById(projectId) ?: return@withLock
-            // Dismiss unconditionally and BEFORE removeProjectData: a
-            // pure-demo folder is deleted right here, so a folderExists
-            // check afterwards is always false — and without the dismissal
-            // the demo project would resurrect on the next empty-workspace
-            // seed. For folder-backed projects this also stops re-adoption
-            // (spec copy: "Images on disk are not touched" — the folder with
-            // the user's images stays, but Loom no longer manages it).
-            dismissed = dismissed + p.slug
-            prefs.addDismissed(p.slug)
-            removeProjectData(p, deleteIfPureDemo = true)
+            var folderGone = false
+            if (deleteFromDisk) {
+                // Owner-confirmed: the whole folder (images + annotations)
+                // is deleted from the workspace.
+                folderGone = runCatching { workspace.deleteFolder(p.slug) }.getOrDefault(false)
+                ImageStore.evict(p.slug)
+            }
+            if (!folderGone) {
+                // Folder (or fallback data) remains on disk — dismiss the
+                // slug so it is neither re-adopted nor re-seeded.
+                dismissed = dismissed + p.slug
+                prefs.addDismissed(p.slug)
+            }
+            removeProjectData(p, deleteIfPureDemo = false)
             _projects.value = _projects.value.filter { it.id != projectId }
-            ImageStore.evict(p.slug)
         }
     }
 
@@ -277,12 +284,19 @@ class LoomRepository(
      * on Project Detail). Files land beside the other images and get fresh
      * empty annotation states.
      */
-    suspend fun addImages(projectId: String, uris: List<Uri>): Int = withContext(io) {
+    suspend fun addImages(
+        projectId: String,
+        uris: List<Uri>,
+        onProgress: suspend (done: Int, total: Int) -> Unit = { _, _ -> },
+    ): Int = withContext(io) {
         mutex.withLock {
             val p = projectById(projectId) ?: return@withLock 0
             val resolver = appContextRef.contentResolver
             val newImages = ArrayList<ProjectImage>()
+            var done = 0
             for (uri in uris) {
+                done++
+                withContext(kotlinx.coroutines.Dispatchers.Main) { onProgress(done, uris.size) }
                 val display = queryDisplayName(uri) ?: "photo.jpg"
                 val fileName = uniqueFileName(p, display)
                 val stream = runCatching { resolver.openInputStream(uri) }.getOrNull() ?: continue
@@ -431,16 +445,9 @@ class LoomRepository(
         // sidecar EXISTS and the state was cleared, overwrite it with an
         // empty document — otherwise rescan resurrects the stale shapes.
         if (!st.hasContent && !workspace.fileExists(project.slug, sidecar)) return
-        val bytes = if (embedImage) {
-            try {
-                workspace.openInput(project.slug, im.file)?.use { it.readBytes() }
-            } catch (e: Exception) {
-                null
-            }
-        } else {
-            null
-        }
-        workspace.writeText(project.slug, sidecar, LabelMeCodec.encode(project, im, st, bytes))
+        // ANNOTATION DATA ONLY — never embed the image bytes (owner req:
+        // the sidecar must stay far smaller than the image).
+        workspace.writeText(project.slug, sidecar, LabelMeCodec.encode(project, im, st, null))
     }
 
     /** Per-image LabelMe JSONs for every annotated image (no imageData). */

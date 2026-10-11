@@ -75,4 +75,24 @@ class UndoStackTest {
         assertEquals(null, h.present)
         assertFalse(h.canUndo)
     }
+    @Test
+    fun amendReplacesTheLastCommitInsteadOfStacking() {
+        val stack = UndoStack<Int>(10)
+        stack.reset(0)
+        stack.commit { it + 10 }     // -> 10
+        val fused = stack.amend { it + 5 }   // -> 15, same undo unit
+        assertTrue(fused)
+        assertEquals(15, stack.present)
+        stack.undo()
+        assertEquals(0, stack.present) // one undo past BOTH the commit and amend
+        assertFalse(stack.canUndo)
+    }
+
+    @Test
+    fun amendWithEmptyHistoryReturnsFalse() {
+        val stack = UndoStack<Int>(10)
+        stack.reset(7)
+        assertFalse(stack.amend { it + 1 })
+        assertEquals(7, stack.present)
+    }
 }

@@ -23,6 +23,7 @@ class UndoStack<T>(var depth: Int) {
         private set
 
     val canUndo: Boolean get() = undoStack.isNotEmpty()
+    val canFuse: Boolean get() = undoStack.isNotEmpty()
     val canRedo: Boolean get() = redoStack.isNotEmpty()
 
     /** Set a fresh value without recording history. */
@@ -40,6 +41,20 @@ class UndoStack<T>(var depth: Int) {
         while (undoStack.size > cap) undoStack.removeFirst()
         redoStack.clear()
         present = updater(prev)
+    }
+
+    /**
+     * Replaces the result of the MOST RECENT commit (history depth is not
+     * increased): `commit(dot)` followed by `amend(mesh)` makes ONE undo
+     * unit that removes the dot AND the mesh together. No-op with empty
+     * history (behaves like commit-less present update is NOT allowed —
+     * callers fall back to commit).
+     */
+    fun amend(updater: (T) -> T): Boolean {
+        val cur = present ?: return false
+        if (undoStack.isEmpty()) return false
+        present = updater(cur)
+        return true
     }
 
     fun undo() {

@@ -108,10 +108,44 @@ class AnnotateState(undoDepth: Int) {
         denseRing = null
     }
 
-    /** One completed gesture = one undo unit. */
+    /**
+     * When true, the NEXT sculpt/segmentation result is AMENDED into the
+     * last commit instead of adding one — so one Undo removes the prompt
+     * dot AND the mesh it produced together. Set by dot placement; any
+     * other commit resets it.
+     */
+    var fuseNextCommit by mutableStateOf(false)
+        private set
+
+    /** Edge midpoint armed for insertion (two-tap confirm); null = none. */
+    var pendingMid by mutableStateOf<Int?>(null)
+
+    fun armFusion() {
+        fuseNextCommit = true
+    }
+
+    /** One completed gesture = one undo unit (resets prompt fusion). */
     fun commit(updater: (ImageState) -> ImageState) {
+        fuseNextCommit = false
         stack.commit(updater)
         present = stack.present ?: return
+    }
+
+    /**
+     * Applies [updater] fused into the last commit when [fuseNextCommit]
+     * is armed (dot add → mask = one undo unit); otherwise a normal commit.
+     * Returns true when fused.
+     */
+    fun commitOrFuse(updater: (ImageState) -> ImageState): Boolean {
+        return if (fuseNextCommit && stack.canFuse) {
+            fuseNextCommit = false
+            stack.amend(updater)
+            present = stack.present ?: return false
+            true
+        } else {
+            commit(updater)
+            false
+        }
     }
 
     fun undo() {

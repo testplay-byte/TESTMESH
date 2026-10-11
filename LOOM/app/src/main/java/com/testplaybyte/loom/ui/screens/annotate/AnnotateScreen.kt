@@ -288,7 +288,7 @@ fun AnnotateScreen(
                 state.sculpting = false
                 return@LaunchedEffect
             }
-            state.commit { prev ->
+            state.commitOrFuse { prev ->
                 prev.copy(
                     mesh = if (hasPos) {
                         MeshMath.buildMesh(
@@ -356,14 +356,25 @@ fun AnnotateScreen(
                             return@launch
                         }
                         val denseWorld = denseImg.map { layout.imageToWorld(it.x, it.y) }
+                        // densityAuto → the optimal minimal fit; manual →
+                        // refit the dense mask at the user's vertex count
                         val (ring, autoDensity) = withContext(Dispatchers.Default) {
-                            MeshMath.autoFitRing(denseWorld, LoomRules.DENSITY_MIN, LoomRules.DENSITY_MAX)
+                            if (state.present.densityAuto) {
+                                MeshMath.autoFitRing(denseWorld, LoomRules.DENSITY_MIN, LoomRules.DENSITY_MAX)
+                            } else {
+                                MeshMath.fitRing(
+                                    denseWorld,
+                                    LoomRules.clampDensity(state.present.density),
+                                ) to LoomRules.clampDensity(state.present.density)
+                            }
                         }
                         state.denseRing = denseWorld
-                        state.commit { prev ->
+                        // fused with the prompt commit when armed: one Undo
+                        // removes the dot AND the mask together
+                        state.commitOrFuse { prev ->
                             prev.copy(
                                 mesh = ring,
-                                density = autoDensity,
+                                density = if (prev.densityAuto) autoDensity else prev.density,
                                 // brush strokes are consumed by the mask
                                 strokes = emptyList(),
                             )
@@ -397,7 +408,10 @@ fun AnnotateScreen(
     // ── exit flush ───────────────────────────────────────────────────────
     fun flushAndExit() {
         scope.launch {
-            vm.repository.saveImageState(project.id, image.id, state.present, embedImage = true)
+            vm.repository.saveImageState(project.id, image.id, state.present)
+            if (state.present.objects.isNotEmpty() || state.present.mesh != null) {
+                vm.repository.setImageStatus(project.id, image.id, ImageStatus.DONE)
+            }
             onExit()
         }
     }
@@ -524,23 +538,21 @@ fun AnnotateScreen(
         }
 
         // ── canvas + overlays ────────────────────────────────────────────
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .background(c.text.copy(alpha = 0.03f * pulseAlpha.value)),
-        ) {
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             key(image.id) {
             CanvasStage(
                 scene = scene,
                 photo = photo,
-                toneHint = scene?.tone ?: c.surface2.toArgbInt(),
+                toneHint = scene?.tone ?: c.canvas.toArgbInt(),
                 state = state,
                 dotSizeWorld = settings.dotSize,
                 magnifier = settings.magnifier,
                 showHint = hintVisible,
                 onHintTap = { dismissHint() },
                 onWarn = { msg -> vm.toast(msg, ToastIcon.WARN) },
+                labelColors = project.labels.associate {
+                    it.id to com.testplaybyte.loom.ui.theme.classColor(it.color)
+                },
                 onCanvasFeedback = {
                     if (settings.haptics) {
                         haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -702,7 +714,13 @@ fun AnnotateScreen(
                             name = lbl?.name ?: "Object",
                             colorToken = lbl?.color ?: "c1",
                             active = false,
-                            onClick = { reopenObject(state, obj.id) },
+                            onClick = {
+                                if (state.mesh != null) {
+                                    vm.toast("Save or remove the current object first", ToastIcon.WARN)
+                                } else {
+                                    reopenObject(state, obj.id)
+                                }
+                            },
                         )
                     }
                     val curLabel = project.labels.firstOrNull { it.id == state.present.labelId }
@@ -744,7 +762,7 @@ fun AnnotateScreen(
                     min = LoomRules.DENSITY_MIN,
                     max = LoomRules.DENSITY_MAX,
                     contentDescription = "Mesh density",
-                    suffix = "pts",
+                    suffix = if (state.present.densityAuto) "auto" else "pts",
                     onChange = { v ->
                         state.densityDraft = v
                         scope.launch {
@@ -753,11 +771,15 @@ fun AnnotateScreen(
                                 state.commit { prev ->
                                     prev.copy(
                                         density = v,
+                                        densityAuto = false,
                                         mesh = remeshForImage(image, v, prev, state.denseRing),
                                     )
                                 }
                                 state.densityDraft = null
                                 state.meshGen++
+                                // manual density becomes the default for
+                                // not-yet-annotated images too (owner req)
+                                vm.repository.patchSettings(settings.copy(defaultDensity = v))
                                 pulseNow()
                             }
                         }
@@ -775,6 +797,15 @@ fun AnnotateScreen(
                 if (state.mesh != null) {
                     LoomButton(
                         onClick = {
+                            if (project.labels.isEmpty()) {
+                                vm.toast("Add a class on the project screen first", ToastIcon.WARN)
+                                return@LoomButton
+                            }
+                            if (state.present.labelId == null) {
+                                // never save with an implicit class — ask
+                                objOpen = true
+                                return@LoomButton
+                            }
                             state.commit { prev ->
                                 val m = prev.mesh ?: return@commit prev
                                 prev.copy(
@@ -950,12 +981,6 @@ fun AnnotateScreen(
     }
 
     LoomSheet(open = objOpen, onClose = { objOpen = false }, title = "Object") {
-        Text(
-            text = "The mesh on this image is one object. Name it with a class label and tune how it is built — everything here lands in the same undo history.",
-            style = loomType.small,
-            color = c.textMuted,
-        )
-        Spacer(Modifier.height(10.dp))
         Text("CLASS", style = loomType.sectionLabel, color = c.textMuted)
         if (project.labels.isEmpty()) {
             Spacer(Modifier.height(6.dp))
@@ -990,7 +1015,14 @@ fun AnnotateScreen(
                 contentDescription = "Mesh density",
                 suffix = "pts",
                 onChange = { v ->
-                    state.commit { prev -> prev.copy(density = v, mesh = remeshForImage(image, v, prev, state.denseRing)) }
+                    state.commit { prev ->
+                        prev.copy(
+                            density = v,
+                            densityAuto = false,
+                            mesh = remeshForImage(image, v, prev, state.denseRing),
+                        )
+                    }
+                    vm.repository.patchSettings(settings.copy(defaultDensity = v))
                     state.meshGen++
                 },
             )
@@ -1036,12 +1068,6 @@ fun AnnotateScreen(
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Removing the mesh keeps your prompt dots — the next dot change re-sculpts it.",
-            style = loomType.small,
-            color = c.textMuted,
-        )
     }
 }
 

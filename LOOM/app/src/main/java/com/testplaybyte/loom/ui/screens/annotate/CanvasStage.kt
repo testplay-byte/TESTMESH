@@ -127,6 +127,7 @@ fun CanvasStage(
     onHintTap: () -> Unit = {},
     onWarn: (String) -> Unit = {},
     onCanvasFeedback: () -> Unit = {},
+    labelColors: Map<String, androidx.compose.ui.graphics.Color> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     val c = loomColors
@@ -224,19 +225,21 @@ fun CanvasStage(
                         drawStrokePolyline(brush.pts, strokeColor)
                     }
 
-                    // saved objects sit under the working mesh, dimmer
+                    // saved objects sit under the working mesh, dimmer,
+                    // each in its CLASS color
                     for (obj in state.present.objects) {
                         if (obj.mesh.size < 3) continue
-                        drawObjectMesh(obj.mesh, c, cam.scale, active = false)
+                        drawObjectMesh(obj.mesh, labelColors[obj.labelId] ?: c.mesh, c, cam.scale)
                     }
 
-                    // mesh: soft fill + amber line + marching ants + handles
+                    // mesh: soft fill + CLASS-colored line + ants + handles
+                    val meshColor = labelColors[state.present.labelId] ?: c.mesh
                     if (liveMesh != null && liveMesh.size >= 3) {
                         val path = polygonPath(liveMesh)
                         run {
-                            drawPath(path, color = c.meshSoft)
+                            drawPath(path, color = meshColor.copy(alpha = 0.14f))
                             drawPath(
-                                path, color = c.mesh,
+                                path, color = meshColor,
                                 style = Stroke(width = 2f / cam.scale, join = StrokeJoin.Round),
                             )
                             // marching ants: dash period and offset in world units
@@ -257,31 +260,42 @@ fun CanvasStage(
                                 for (i in liveMesh.indices) {
                                     val p = liveMesh[i]
                                     val q = liveMesh[(i + 1) % liveMesh.size]
+                                    val armed = state.pendingMid == i
+                                    val m = Offset((p.x + q.x) / 2f, (p.y + q.y) / 2f)
                                     drawCircle(
-                                        color = c.canvas,
-                                        radius = 2.0f,
-                                        center = Offset((p.x + q.x) / 2f, (p.y + q.y) / 2f),
+                                        color = if (armed) meshColor else c.canvas,
+                                        radius = if (armed) 2.8f else 2.0f,
+                                        center = m,
                                     )
                                     drawCircle(
-                                        color = c.mesh,
-                                        radius = 2.0f,
-                                        center = Offset((p.x + q.x) / 2f, (p.y + q.y) / 2f),
+                                        color = if (armed) c.canvas else meshColor,
+                                        radius = if (armed) 2.8f else 2.0f,
+                                        center = m,
                                         style = Stroke(width = 1.2f),
                                     )
                                 }
                                 for (i in liveMesh.indices) {
                                     val p = liveMesh[i]
                                     val selected = (state.selection as? Selection.Vertex)?.index == i
+                                    if (selected) {
+                                        // prominent selection halo (the grab
+                                        // target must be obvious)
+                                        drawCircle(
+                                            color = meshColor.copy(alpha = 0.35f),
+                                            radius = 9f,
+                                            center = Offset(p.x, p.y),
+                                        )
+                                    }
                                     drawCircle(
                                         color = Color(0xFFFFFDF6),
-                                        radius = if (selected) 5.5f else 3.4f,
+                                        radius = if (selected) 4.2f else 2.6f,
                                         center = Offset(p.x, p.y),
                                     )
                                     drawCircle(
-                                        color = if (selected) c.primary else c.mesh,
-                                        radius = if (selected) 5.5f else 3.4f,
+                                        color = if (selected) c.primary else meshColor,
+                                        radius = if (selected) 4.2f else 2.6f,
                                         center = Offset(p.x, p.y),
-                                        style = Stroke(width = if (selected) 2.2f else 1.8f),
+                                        style = Stroke(width = if (selected) 2f else 1.6f),
                                     )
                                 }
                             }
@@ -341,12 +355,17 @@ private fun polygonPath(pts: List<Pt>): Path = Path().apply {
     close()
 }
 
-/** A saved object: dim fill + hairline, no handles. */
-private fun DrawScope.drawObjectMesh(mesh: List<Pt>, c: com.testplaybyte.loom.ui.theme.LoomColors, camScale: Float, active: Boolean) {
+/** A saved object in its class color: dim fill + hairline, no handles. */
+private fun DrawScope.drawObjectMesh(
+    mesh: List<Pt>,
+    color: Color,
+    c: com.testplaybyte.loom.ui.theme.LoomColors,
+    camScale: Float,
+) {
     val path = polygonPath(mesh)
-    drawPath(path, color = c.meshSoft.copy(alpha = if (active) 1f else 0.5f))
+    drawPath(path, color = c.meshSoft.copy(alpha = 0.5f))
     drawPath(
-        path, color = c.mesh.copy(alpha = if (active) 1f else 0.55f),
+        path, color = color.copy(alpha = 0.6f),
         style = Stroke(width = 1.4f / camScale, join = StrokeJoin.Round),
     )
 }
@@ -501,9 +520,11 @@ private fun LoupeOverlay(
     } ?: return
     val cam = state.cam
     val half = LOUPE_PX / 2f
-    // Fixed parking spot in the TOP-RIGHT corner, far from the finger —
-    // the magnifier must never sit under the drag point.
-    val cx = viewport.width - half - 16f
+    // Fixed parking spot in a TOP corner, far from the finger — it flips
+    // to the top-left when the drag happens in the top-right region so it
+    // never covers the work area or leaves the viewport.
+    val nearTopRight = sy < LOUPE_PX + 60f && sx > viewport.width - LOUPE_PX - 60f
+    val cx = if (nearTopRight) half + 16f else viewport.width - half - 16f
     val cy = 16f + half
     val lvw = LOUPE_PX / LOUPE_MAG
     val vx = pos.x - lvw / 2f
@@ -516,7 +537,12 @@ private fun LoupeOverlay(
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((cx - half).toInt(), (cy - half).toInt()) }
+            .offset {
+                IntOffset(
+                    clamp(cx - half, 0f, max(0f, viewport.width - LOUPE_PX)).toInt(),
+                    clamp(cy - half, 0f, max(0f, viewport.height - LOUPE_PX)).toInt(),
+                )
+            }
             .size(LOUPE_PX.dp)
             .clip(CircleShape)
             .background(c.canvas)
@@ -789,6 +815,29 @@ private class Gestures(
 
     var onWarn: ((String) -> Unit)? = null
     var onDotPlaced: (() -> Unit)? = null
+    private var lpJob: kotlinx.coroutines.Job? = null
+
+    // deferred dot placement (tap on release / long-press select)
+    private var pendingDotKind: DotKind? = null
+    private var pendingDotPos = Pt(0f, 0f)
+
+    private fun scheduleDotTap() {
+        lpJob?.cancel()
+        lpJob = scope.launch {
+            delay(500)
+            val k = pendingDotKind ?: return@launch
+            pendingDotKind = null
+            val hit = hitDot(pendingDotPos)
+            if (hit != null) {
+                // long-press = grab the nearest dot (with a tick)
+                kind = Kind.DOT
+                dotId = hit.id
+                state.selection = Selection.DotSel(hit.id)
+                onCanvasFeedback?.invoke()
+            }
+            // nothing under the finger → a plain long-press does nothing
+        }
+    }
 
     // ── pointer loop ─────────────────────────────────────────────────────
 
@@ -806,6 +855,8 @@ private class Gestures(
                     beginGesture(downPos, downType)
                     runGesture()
                 } finally {
+                    lpJob?.cancel()
+                    pendingDotKind = null
                     state.gestureActive = false
                     state.live = null
                     kind = Kind.NONE
@@ -851,25 +902,22 @@ private class Gestures(
                 startTx = state.cam.tx
                 startTy = state.cam.ty
             }
-            Tool.DOT_POS ->
-                if (hitDot(w) != null) {
-                    // Press ON an existing dot = move it (tap adds, drag moves).
+            Tool.DOT_POS, Tool.DOT_NEG -> {
+                val dotKind = if (state.tool == Tool.DOT_POS) DotKind.POS else DotKind.NEG
+                val hit = hitDot(w)
+                if (hit != null) {
+                    // Press ON an existing dot = move it.
                     beginDotMove(w)
                 } else {
-                    addDot(DotKind.POS, w)?.let { d ->
-                        kind = Kind.DOT
-                        dotId = d.id
-                    }
+                    // Defer the add to RELEASE: a two-finger pinch or a
+                    // one-finger pan starting here must NOT place a dot.
+                    // Long-press (500ms) selects the nearest dot instead.
+                    kind = Kind.NONE
+                    pendingDotKind = dotKind
+                    pendingDotPos = w
+                    scheduleDotTap()
                 }
-            Tool.DOT_NEG ->
-                if (hitDot(w) != null) {
-                    beginDotMove(w)
-                } else {
-                    addDot(DotKind.NEG, w)?.let { d ->
-                        kind = Kind.DOT
-                        dotId = d.id
-                    }
-                }
+            }
             Tool.BRUSH -> {
                 kind = Kind.BRUSH
                 brushId = Ids.uid("str")
@@ -919,6 +967,8 @@ private class Gestures(
     private fun beginPinch(points: List<Offset>) {
         // commit whatever single-finger gesture was in flight
         finishSingleGesture(commit = true)
+        pendingDotKind = null
+        lpJob?.cancel()
         val a = points[0]
         val b = points[1]
         val mid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
@@ -985,7 +1035,21 @@ private class Gestures(
                     state.live = Live.BrushLive(brushPts.toList())
                 }
             }
-            Kind.PINCH, Kind.NONE -> Unit
+            Kind.NONE -> {
+                if (pendingDotKind != null) {
+                    if (!moved && hypot(pos.x - pressStage.x, pos.y - pressStage.y) > slopPx) {
+                        moved = true
+                        pendingDotKind = null
+                        lpJob?.cancel()
+                        // one-finger pan with a dot tool
+                        kind = Kind.PAN
+                        startTx = state.cam.tx
+                        startTy = state.cam.ty
+                        pressStage = pos
+                    }
+                }
+            }
+            Kind.PINCH -> Unit
         }
         @Suppress("UNUSED_EXPRESSION") change
     }
@@ -1004,17 +1068,59 @@ private class Gestures(
     }
 
     private fun endGesture() {
+        lpJob?.cancel()
         state.gestureActive = false
         when (kind) {
             Kind.PAN -> {
                 if (!moved) {
                     when (tapIntent) {
-                        TapIntent.INSERT -> insertAt(toWorld(pressStage))
-                        TapIntent.DESELECT -> state.selection = null
+                        TapIntent.INSERT -> {
+                            // two-tap midpoint confirm: arm first, insert second
+                            val meshNow = state.mesh
+                            val w = toWorld(pressStage)
+                            var midIdx = -1
+                            var bestD = Float.MAX_VALUE
+                            if (meshNow != null && meshNow.size >= 3) {
+                                for (i in meshNow.indices) {
+                                    val p = meshNow[i]
+                                    val q = meshNow[(i + 1) % meshNow.size]
+                                    val d = MeshMath.distToSegment(w, p, q)
+                                    if (d < bestD) { bestD = d; midIdx = i }
+                                }
+                            }
+                            if (bestD <= edgeSnapPx / state.cam.scale) {
+                                if (state.pendingMid == midIdx) {
+                                    state.pendingMid = null
+                                    insertAt(toWorld(pressStage))
+                                    onCanvasFeedback?.invoke()
+                                } else {
+                                    state.pendingMid = midIdx
+                                    state.selection = null
+                                    onCanvasFeedback?.invoke()
+                                }
+                            } else {
+                                state.pendingMid = null
+                                state.selection = null
+                            }
+                        }
+                        TapIntent.DESELECT -> {
+                            state.selection = null
+                            state.pendingMid = null
+                        }
                         TapIntent.NONE -> {
                             if (state.tool == Tool.PAN) handleDoubleTap()
                         }
                     }
+                }
+            }
+            Kind.NONE -> {
+                // deferred dot add fires on release of a clean tap
+                val k = pendingDotKind
+                if (k != null && !moved) {
+                    pendingDotKind = null
+                    addDot(k, pendingDotPos)
+                } else {
+                    pendingDotKind = null
                 }
             }
             Kind.VERTEX -> {

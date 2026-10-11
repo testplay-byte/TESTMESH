@@ -129,9 +129,9 @@ fun SettingsScreen(
                     LoomSegmented(
                         value = settings.dotSize,
                         options = listOf(
-                            SegOption(8, "S", null),
+                            SegOption(6, "S", null),
                             SegOption(10, "M", null),
-                            SegOption(14, "L", null),
+                            SegOption(16, "L", null),
                         ),
                         onSelect = { patch(settings.copy(dotSize = it)) },
                         contentDescription = "Dot size",

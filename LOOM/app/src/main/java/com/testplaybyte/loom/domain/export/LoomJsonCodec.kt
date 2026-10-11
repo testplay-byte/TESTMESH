@@ -111,6 +111,7 @@ object LoomJsonCodec {
             o.put("label", project.labels.firstOrNull { it.id == st.labelId }?.name ?: JSONObject.NULL)
             o.put("tags", JSONArray(st.tags))
             o.put("density", st.density)
+            o.put("densityAuto", st.densityAuto)
             o.put("dots", dotsArray(st.dots, fx, fy))
             o.put("mesh", meshArray(st.mesh, fx, fy))
             o.put("objects", objectsArray(st, project, fx, fy))
@@ -241,6 +242,7 @@ object LoomJsonCodec {
                     labelName = if (o.isNull("label")) null else o.optString("label", "").ifEmpty { null },
                     tags = stringList(o.optJSONArray("tags")),
                     density = LoomRules.clampDensity(o.optInt("density", 16)),
+                    densityAuto = o.optBoolean("densityAuto", true),
                     dots = decodeDots(o.optJSONArray("dots")),
                     mesh = decodeMesh(o.optJSONArray("mesh")),
                     objects = decodeObjects(o.optJSONArray("objects")),

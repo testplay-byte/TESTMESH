@@ -54,8 +54,10 @@ data class ImageState(
     /** Saved objects — an image can hold any number of them. */
     val objects: List<ObjAnn> = emptyList(),
     val strokes: List<Stroke> = emptyList(),
-    /** Target vertex count (3–200; auto-chosen by the smart mask). */
+    /** Target vertex count (3–200; auto-chosen while [densityAuto]). */
     val density: Int = 16,
+    /** True until the user manually picks a density on this image. */
+    val densityAuto: Boolean = true,
     /** Class label of the WORKING mesh's object (null until named). */
     val labelId: String? = null,
     /** Quality flags (max 8). */
@@ -213,7 +215,7 @@ object LoomRules {
     const val DEFAULT_DENSITY_MAX = 36
     const val UNDO_MIN = 10
     const val UNDO_MAX = 100
-    const val UNDO_STEP = 10
+    const val UNDO_STEP = 5
     const val SPLIT_MAX = 40
     const val DOT_SIZES_MIN = 8
     const val DOT_SIZES_MAX = 14

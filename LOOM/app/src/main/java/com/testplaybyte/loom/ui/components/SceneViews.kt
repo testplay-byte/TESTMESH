@@ -235,13 +235,14 @@ fun ThumbFrame(
 fun ArtFrame(
     modifier: Modifier = Modifier,
     radius: androidx.compose.ui.unit.Dp = 8.dp,
+    background: androidx.compose.ui.graphics.Color? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val c = loomColors
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(radius))
-            .background(c.surface2)
+            .background(background ?: c.surface2)
             .border(1.dp, c.hairline, RoundedCornerShape(radius)),
     ) {
         content()
