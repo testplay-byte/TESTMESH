@@ -7,8 +7,10 @@ folder on device + images + label classes), then annotate each image with
 or draw around it with the brush, and an on-device MediaPipe
 InteractiveSegmenter masks the object; the mask is traced into an
 **adaptive polygon mesh** that hugs curvature (dense on fingertips, two
-points on straight runs). An image holds any number of **objects**, each
-saved as its own editable polygon. Every image gets a **LabelMe v5 JSON
+points on straight runs — density is auto until you pick a manual count,
+which then applies to future images too). One **Undo** removes a prompt dot
+and the mask it produced together. An image holds any number of
+**objects**, each saved as its own editable polygon in its class color. Every image gets a **LabelMe v5 JSON
 sidecar**; datasets **export** to Loom JSON / COCO / YOLO / Pascal VOC.
 
 Built from the full "Loom" design handoff package (warm graphite + signal
@@ -87,7 +89,9 @@ success. The mask is traced DENSE by `domain/seg/MaskToPolygon.kt`
 so vertices land where the boundary curves, not uniformly. `autoFitRing`
 picks the optimal minimal count (eps = 0.006 × max bbox dim) and the
 stepper range is **3–200 pts** (hold a stepper button and the repeat
-accelerates 250→60 ms). Demo scenes keep the deterministic anchor sculpt
+accelerates 250→60 ms). The stepper reads **auto** until the user picks a
+manual count — a manual value is kept per image, survives restarts, and
+becomes the starting count for not-yet-annotated images. Demo scenes keep the deterministic anchor sculpt
 from `mesh.ts` instead — they are synthetic art with known anchors.
 
 ## Multi-object model
@@ -111,8 +115,10 @@ zoom goes to 10×.
 - Vertex edit: drag with the corner **loupe** (112 px @ 3.2×), tap-near-edge
   inserts, selected vertex deletes via the Delete chip; every completed
   gesture = exactly one undo unit.
-- Autosave 300 ms debounce (sidecars without imageData); **flush on image
-  switch and canvas exit** (sidecars embed the image bytes).
+- Autosave 300 ms debounce; **flush on image switch and canvas exit**
+  (exiting a fully annotated image marks it DONE). Sidecars are
+  ANNOTATION-ONLY — image bytes are never embedded, so `hand.json` stays
+  tiny next to `hand.jpg`.
 - First-run hint: square-ish card, 2 s, tap-dismiss, once ever.
 - Image tags (max 8) ride the same history and export with the dataset.
 
@@ -172,12 +178,12 @@ Design rules kept from the handoff package:
 | Storage is folder-first, not Room | The owner's requirement: the picked workspace folder is used for everything and must detect hand-added images. `loom-project.json` + sidecars are the database; DataStore holds settings/perms. |
 | Persistence has no Room at all | With the folder as source of truth, a second DB would only risk divergence. |
 | Multi-object annotations | The prototype allowed ONE mesh per image; the owner requires several objects per image with save/re-open semantics. |
-| Per-image LabelMe sidecars are the user-facing format | Owner requirement ("EXAMPLE LABEL JSON"): each image gets its own LabelMe v5.11 `.json` in real pixels. `annotations.json` remains as the app's internal whole-project state (dots/tags/status are not representable in LabelMe). |
+| Per-image LabelMe sidecars are the user-facing format | Owner requirement ("EXAMPLE LABEL JSON"): each image gets its own LabelMe v5.11 `.json` in real pixels, annotation data only (no embedded `imageData`). `annotations.json` remains as the app's internal whole-project state (dots/tags/status are not representable in LabelMe). |
 | Magic Touch is a real ML model, not the deterministic "smart model" | Owner requirement: Edge Gallery Scrapbook semantics (MediaPipe InteractiveSegmenter). The deterministic mesh.ts sculpt remains for demo scenes and as the dot-influence fallback. |
-| Density range 3–200, adaptive vertex placement | Owner requirement; the prototype spec'd 6–40 uniform arc-length points. |
+| Density range 3–200, adaptive vertex placement, auto/manual | Owner requirement; the prototype spec'd 6–40 uniform arc-length points. Auto picks the optimal minimal count; a manual pick persists (per image + as the default for future images). |
 | No location step in New Project, no image picking | Owner requirement: the folder is the storage folder + slug; projects start empty and images arrive via picker/folder drop. |
 | Permissions screen shows exactly two grants | Owner requirement: no "All files" card — SAF tree access is the scoped permission. |
-| "Add images" action on Project detail | Necessary for a real dataset tool (the spec defers the photo picker; the folder scanner alone would leave imported photos with no entry point). Uses the system photo picker; files are copied into the project folder. |
+| Two-step project deletion (optional whole-folder delete) | Owner requirement: the first confirm removes Loom data only; a second confirm warns that the ENTIRE folder (images + annotations) will be deleted and really deletes it. | for a real dataset tool (the spec defers the photo picker; the folder scanner alone would leave imported photos with no entry point). Uses the system photo picker; files are copied into the project folder. |
 | Settings → About repository string | Shows the real repository (`testplay-byte/TESTMESH`) instead of the prototype's demo repo name. |
 | Splash is the logo only, fully animated | Owner feedback: no bar/tagline; the animation lives on the mark (PathMeasure trim + weaving arcs + spring dots + settle scale). |
 | YOLO export = segmentation format | Meshes are polygons; `labels/*.txt` carry `classIndex x1 y1 …` and the export README documents the choice (per docs/05 §5). |
